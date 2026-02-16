@@ -2,6 +2,7 @@ use crate::parsing::{AtomRecord, PdbFile};
 use crate::view_rs::To3dViewMolecule;
 use egui;
 use graphics::{EngineUpdates, Scene, winit::event::WindowEvent};
+use moleucle_3dview_rs::OrbitalCamera;
 use moleucle_3dview_rs::{
     CameraController, Molecule, MoleculeViewer, SelectedAtomRender, viewer::ViewerEvent,
 };
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 pub struct KuromameApp {
     // Viewer state
     pub viewer: MoleculeViewer<SelectedAtomRender>,
-    pub controller: CameraController,
+    pub controller: CameraController<OrbitalCamera>,
 
     // Data state
     pub pdb_file: Option<PdbFile>,

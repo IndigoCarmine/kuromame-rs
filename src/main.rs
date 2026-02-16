@@ -5,9 +5,6 @@ use moleucle_3dview_rs::viewer::ViewerEvent;
 fn main() {
     let mut app = KuromameApp::new();
 
-    // Sync initial camera state
-    app.controller.camera.position = nalgebra::Point3::new(0.0, 0.0, -20.0);
-
     let mut scene = Scene::default();
     app.update_scene(&mut scene);
 
