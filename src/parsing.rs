@@ -3,7 +3,7 @@ use moleucle_3dview_rs::{
     Molecule,
     molecule::{Atom, Bond},
 };
-use nalgebra::Point3;
+use lin_alg::f32::Vec3;
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -150,7 +150,8 @@ impl PdbFile {
         Self { lines }
     }
 
-    pub fn dump(&self) -> String {
+    pub fn dump(&mut self) -> String {
+        self.update_resseq();
         let mut out = String::new();
         for line in &self.lines {
             match line {
@@ -175,6 +176,61 @@ impl PdbFile {
             _ => None,
         })
     }
+
+    pub fn update_resseq(&mut self) {
+        // Collect unique residue names from atoms
+        let mut resnames: Vec<String> = self
+            .atoms()
+            .map(|a| a.res_name.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        resnames.sort();
+
+        // Create a mapping from resname to resseq
+        let resseq_map: HashMap<String, i32> = resnames
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| (name, (i + 1) as i32))
+            .collect();
+
+        // Update all atoms with new resseq
+        for atom in self.atoms_mut() {
+            if let Some(&new_seq) = resseq_map.get(&atom.res_name) {
+                atom.res_seq = new_seq;
+            }
+        }
+    }
+
+    pub fn find_connected_hydrogen(&self, atom: &AtomRecord) -> Vec<AtomRecord> {
+        let mut connected_serials = std::collections::HashSet::new();
+        let target_serial = atom.serial;
+
+        // Scan all CONECT records
+        for line in &self.lines {
+            if let PdbLine::Conect(conect) = line {
+                // Case 1: The record is for the target atom
+                if conect.serial == target_serial {
+                    for serial in &conect.bonded {
+                        connected_serials.insert(*serial);
+                    }
+                }
+                // Case 2: The target atom is in the bonded list of another atom
+                else if conect.bonded.contains(&target_serial) {
+                    connected_serials.insert(conect.serial);
+                }
+            }
+        }
+
+        // Find hydrogen atoms in connected serials
+        let mut hydrogens = Vec::new();
+        for atom_rec in self.atoms() {
+            if connected_serials.contains(&atom_rec.serial) && atom_rec.element == "H" {
+                hydrogens.push(atom_rec.clone());
+            }
+        }
+        hydrogens
+    }
 }
 
 impl To3dViewMolecule for PdbFile {
@@ -188,9 +244,16 @@ impl To3dViewMolecule for PdbFile {
         for (i, record) in self.atoms().enumerate() {
             serial_to_index.insert(record.serial, i);
             atoms.push(Atom {
-                position: Point3::new(record.x, record.y, record.z),
+                position: Vec3::new(record.x, record.y, record.z),
                 element: record.element.clone(),
                 id: i,
+                name: Some(record.name.clone()),
+                res_name: Some(record.res_name.clone()),
+                chain_id: Some(record.chain_id),
+                res_seq: Some(record.res_seq),
+                occupancy: Some(record.occupancy),
+                temp_factor: Some(record.temp_factor),
+                charge: Some(record.charge.clone()),
             });
         }
 
@@ -399,7 +462,7 @@ impl To3dViewMolecule for Mol2File {
         for (i, record) in self.atoms().enumerate() {
             id_to_index.insert(record.atom_id, i);
             atoms.push(Atom {
-                position: Point3::new(record.x, record.y, record.z),
+                position: Vec3::new(record.x, record.y, record.z),
                 element: record
                     .atom_type
                     .split('.')
@@ -407,6 +470,13 @@ impl To3dViewMolecule for Mol2File {
                     .unwrap_or("?")
                     .to_uppercase(),
                 id: i,
+                name: None,
+                res_name: None,
+                chain_id: None,
+                res_seq: None,
+                occupancy: None,
+                temp_factor: None,
+                charge: None,
             });
         }
 
