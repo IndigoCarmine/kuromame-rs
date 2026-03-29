@@ -1,13 +1,66 @@
 use eframe::egui::{self, PointerButton, Sense};
 use lin_alg::f32::Vec2;
 use moleucle_3dview_rs::{
-    camera, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
+    camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle, SelectedAtomRender,
 };
 use crate::parsing::{AtomRecord, PdbFile};
 use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s <= 0.0 {
+        return (l, l, l);
+    }
+
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - (l * s)
+    };
+    let p = 2.0 * l - q;
+
+    fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 1.0 / 2.0 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
+    }
+
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
+fn color_by_res_name(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
+    let key = atom
+        .res_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(atom.element.as_str());
+
+    // Deterministic hash so the same residue name gets the same color each run.
+    let hash = key
+        .bytes()
+        .fold(2166136261u32, |acc, b| (acc ^ (b as u32)).wrapping_mul(16777619));
+    let hue = (hash % 360) as f32 / 360.0;
+    hsl_to_rgb(hue, 0.65, 0.52)
+}
 
 pub struct KuromameApp {
     // Viewer state
@@ -32,6 +85,7 @@ pub struct KuromameApp {
 impl KuromameApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut viewer = MoleculeViewer::new();
+        viewer.set_color_fn(color_by_res_name);
         viewer.additional_render = Some(Box::new(SelectedAtomRender::new()));
 
         Self {
@@ -59,36 +113,42 @@ impl KuromameApp {
     }
 
     pub fn load_file(&mut self, path: PathBuf) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                match ext.to_lowercase().as_str() {
-                    "pdb" | "ent" => {
-                        let pdb = PdbFile::load(&content);
-                        let mol = pdb.to_molecule();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            self.status_msg = "Unsupported file type".to_string();
+            return;
+        };
+
+        match ext.to_lowercase().as_str() {
+            "pdb" | "ent" => {
+                match Molecule::from_pdb(&path) {
+                    Ok(mol) => {
                         self.viewer.set_molecule(mol);
-                        self.pdb_file = Some(pdb);
+                        self.pdb_file = std::fs::read_to_string(&path).ok().map(|content| PdbFile::load(&content));
                         self.current_file_path = Some(path);
                         self.status_msg = "Loaded PDB".to_string();
                     }
-                    "mol2" => {
-                        if let Ok(mol) = Molecule::from_mol2(&path) {
-                            self.viewer.set_molecule(mol);
-                            self.current_file_path = Some(path);
-                            self.status_msg = "Loaded MOL2".to_string();
-                        } else {
-                            self.status_msg = "Failed to load MOL2 file".to_string();
-                        }
+                    Err(_) => {
+                        self.status_msg = "Failed to load PDB file".to_string();
                     }
-                    _ => {
-                        self.status_msg = "Unsupported file type".to_string();
-                    }
-                }
-                if let Some(renderer) = &mut self.viewer.additional_render {
-                    *renderer = Box::new(SelectedAtomRender::new());
                 }
             }
-        } else {
-            self.status_msg = "Failed to read file".to_string();
+            "mol2" => {
+                if let Ok(mol) = Molecule::from_mol2(&path) {
+                    self.viewer.set_molecule(mol);
+                    self.pdb_file = None;
+                    self.current_file_path = Some(path);
+                    self.status_msg = "Loaded MOL2".to_string();
+                } else {
+                    self.status_msg = "Failed to load MOL2 file".to_string();
+                }
+            }
+            _ => {
+                self.status_msg = "Unsupported file type".to_string();
+            }
+        }
+
+        if let Some(renderer) = &mut self.viewer.additional_render {
+            *renderer = Box::new(SelectedAtomRender::new());
         }
     }
 

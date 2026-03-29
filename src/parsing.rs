@@ -3,89 +3,12 @@ use moleucle_3dview_rs::{
     Molecule,
     molecule::{Atom, Bond},
 };
+pub use moleucle_3dview_rs::AtomRecord;
 use lin_alg::f32::Vec3;
 use std::collections::HashMap;
 use std::fmt::Write;
 
 // --- PDB Structures ---
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AtomRecord {
-    pub serial: usize,
-    pub name: String,
-    pub alt_loc: char,
-    pub res_name: String,
-    pub chain_id: char,
-    pub res_seq: i32,
-    pub i_code: char,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub occupancy: f32,
-    pub temp_factor: f32,
-    pub element: String,
-    pub charge: String,
-}
-
-impl AtomRecord {
-    pub fn from_line(line: &str) -> Option<Self> {
-        if line.len() < 54 {
-            return None;
-        }
-
-        let parse_int =
-            |range: std::ops::Range<usize>| -> Option<i32> { line.get(range)?.trim().parse().ok() };
-        let parse_float =
-            |range: std::ops::Range<usize>| -> Option<f32> { line.get(range)?.trim().parse().ok() };
-        let parse_str = |range: std::ops::Range<usize>| -> String {
-            line.get(range)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
-        };
-        let parse_char = |index: usize| -> char {
-            line.get(index..index + 1)
-                .and_then(|s| s.chars().next())
-                .unwrap_or(' ')
-        };
-
-        Some(AtomRecord {
-            serial: parse_int(6..11)? as usize,
-            name: parse_str(12..16),
-            alt_loc: parse_char(16),
-            res_name: parse_str(17..20),
-            chain_id: parse_char(21),
-            res_seq: parse_int(22..26)?,
-            i_code: parse_char(26),
-            x: parse_float(30..38)?,
-            y: parse_float(38..46)?,
-            z: parse_float(46..54)?,
-            occupancy: parse_float(54..60).unwrap_or(0.0),
-            temp_factor: parse_float(60..66).unwrap_or(0.0),
-            element: parse_str(76..78),
-            charge: parse_str(78..80),
-        })
-    }
-
-    pub fn to_line(&self) -> String {
-        format!(
-            "ATOM  {:5} {:<4}{}{:>3} {}{:4}{:<4}{:8.3}{:8.3}{:8.3}{:6.2}{:6.2}          {:>2}{:>2}",
-            self.serial,
-            self.name,
-            self.alt_loc,
-            self.res_name,
-            self.chain_id,
-            self.res_seq,
-            self.i_code,
-            self.x,
-            self.y,
-            self.z,
-            self.occupancy,
-            self.temp_factor,
-            self.element,
-            self.charge
-        )
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ConectRecord {
