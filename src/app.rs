@@ -75,6 +75,7 @@ pub struct KuromameApp {
 
     // Selection state
     pub with_hbond_chk: bool,
+    pub selected_atom_indices: Vec<usize>,
 
     // UI state
     pub status_msg: String,
@@ -96,9 +97,37 @@ impl KuromameApp {
             pdb_file: None,
             current_file_path: None,
             with_hbond_chk: false,
+            selected_atom_indices: Vec::new(),
             status_msg: "Ready".to_string(),
             show_edit_dialog: false,
             new_res_name: "".to_string(),
+        }
+    }
+
+    fn sync_selection_to_renderer(&mut self) {
+        self.viewer
+            .set_selected_atoms(self.selected_atom_indices.clone());
+        self.viewer.dirty = true;
+    }
+
+    fn toggle_selected_atom(&mut self, atom_index: usize) {
+        let mut targets = vec![atom_index];
+        if self.with_hbond_chk {
+            if let Some(mol) = &self.viewer.molecule {
+                targets.extend(Self::collect_connected_hydrogens(atom_index, mol));
+            }
+        }
+
+        targets.sort_unstable();
+        targets.dedup();
+
+        let main_atom_is_selected = self.selected_atom_indices.contains(&atom_index);
+        for idx in targets {
+            if main_atom_is_selected {
+                self.selected_atom_indices.retain(|&i| i != idx);
+            } else if !self.selected_atom_indices.contains(&idx) {
+                self.selected_atom_indices.push(idx);
+            }
         }
     }
 
@@ -150,6 +179,7 @@ impl KuromameApp {
         if let Some(renderer) = &mut self.viewer.additional_render {
             *renderer = Box::new(SelectedAtomRender::new());
         }
+        self.selected_atom_indices.clear();
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -203,7 +233,7 @@ impl KuromameApp {
                 ui.separator();
                 ui.label("Selected atoms:");
 
-                let selected_indices = self.viewer.selected_atoms();
+                let selected_indices = self.selected_atom_indices.clone();
 
                 ui.label(format!("Count: {}", selected_indices.len()));
 
@@ -233,13 +263,11 @@ impl KuromameApp {
                     });
 
                 if ui.button("Clear Selection").clicked() {
-                    if let Some(renderer) = &mut self.viewer.additional_render {
-                        *renderer = Box::new(SelectedAtomRender::new());
-                        self.viewer.dirty = true;
-                    }
+                    self.selected_atom_indices.clear();
+                    self.sync_selection_to_renderer();
                 }
 
-                let can_select_path = selected_indices.len() == 2 && !self.with_hbond_chk;
+                let can_select_path = selected_indices.len() == 2;
                 if ui
                     .add_enabled(
                         can_select_path,
@@ -270,34 +298,36 @@ impl KuromameApp {
     }
 
     fn select_shortest_path(&mut self, start: usize, end: usize) {
-        if let Some(mol) = &self.viewer.molecule {
-            // Find all atoms on all simple paths between start and end
-            let atoms_on_path = Self::find_atoms_between_dfs(mol, start, end);
-            
-            let mut selected_indices = atoms_on_path.clone();
+        let Some(mol) = &self.viewer.molecule else {
+            return;
+        };
 
-            // If H-bond check is on, collect connected hydrogens for each atom on path
-            if self.with_hbond_chk {
-                let mut hydrogens = Vec::new();
-                for &idx in &atoms_on_path {
-                    Self::collect_connected_hydrogens(idx, mol, &mut hydrogens);
-                }
-                // Avoid duplicates
-                for h in hydrogens {
-                    if !selected_indices.contains(&h) {
-                        selected_indices.push(h);
-                    }
+        // Find all atoms on all simple paths between start and end
+        let atoms_on_path = Self::find_atoms_between_dfs(mol, start, end);
+
+        let mut selected_indices = atoms_on_path.clone();
+
+        // If H-bond check is on, collect connected hydrogens for each atom on path
+        if self.with_hbond_chk {
+            let mut hydrogens = Vec::new();
+            for &idx in &atoms_on_path {
+                hydrogens.extend(Self::collect_connected_hydrogens(idx, mol));
+            }
+            hydrogens.sort_unstable();
+            hydrogens.dedup();
+            // Avoid duplicates
+            for h in hydrogens {
+                if !selected_indices.contains(&h) {
+                    selected_indices.push(h);
                 }
             }
-
-            // Update renderer with all selected atoms
-            if let Some(renderer) = &mut self.viewer.additional_render {
-                for idx in selected_indices {
-                    renderer.toggle_atom(idx);
-                }
-            }
-            self.viewer.dirty = true;
         }
+
+        // Toggle selected atoms in App state, then sync into renderer.
+        for idx in selected_indices {
+            self.toggle_selected_atom(idx);
+        }
+        self.sync_selection_to_renderer();
     }
 
     fn find_atoms_between_dfs(mol: &Molecule, start: usize, end: usize) -> Vec<usize> {
@@ -359,7 +389,8 @@ impl KuromameApp {
         result
     }
 
-    fn collect_connected_hydrogens(atom_idx: usize, mol: &Molecule, out: &mut Vec<usize>) {
+    fn collect_connected_hydrogens(atom_idx: usize, mol: &Molecule) -> Vec<usize> {
+        let mut hydrogens = Vec::new();
         for bond in &mol.bonds {
             let neighbor = if bond.atom_a == atom_idx {
                 Some(bond.atom_b)
@@ -372,12 +403,13 @@ impl KuromameApp {
             if let Some(n_idx) = neighbor {
                 if let Some(atom) = mol.atoms.get(n_idx) {
                     // Check if element starts with "H" (matching Python's "H" in name check)
-                    if atom.element.starts_with("H") && !out.contains(&n_idx) {
-                        out.push(n_idx);
+                    if atom.element.starts_with("H") && !hydrogens.contains(&n_idx) {
+                        hydrogens.push(n_idx);
                     }
                 }
             }
         }
+        hydrogens
     }
 
     fn apply_res_name_change(&mut self) {
@@ -389,7 +421,7 @@ impl KuromameApp {
         let new_name = format!("{:>3}", new_name); // Pad to 3 chars
 
         if let Some(pdb) = &mut self.pdb_file {
-            let indices_to_update = self.viewer.selected_atoms();
+            let indices_to_update = self.selected_atom_indices.clone();
 
             // Update PDB atoms
             let mut atoms_vec: Vec<&mut AtomRecord> = pdb.atoms_mut().collect();
@@ -405,9 +437,8 @@ impl KuromameApp {
             self.viewer.set_molecule(mol);
 
             // Clear selection
-            if let Some(renderer) = &mut self.viewer.additional_render {
-                *renderer = Box::new(SelectedAtomRender::new());
-            }
+            self.selected_atom_indices.clear();
+            self.sync_selection_to_renderer();
             self.status_msg = "Residue names updated".to_string();
         }
     }
@@ -437,7 +468,7 @@ impl eframe::App for KuromameApp {
             .show(ctx, |ui| {
                 ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
                 ui.label("Drop a PDB/MOL2 file anywhere in the window to load it");
-                ui.label(format!("Selected atoms: {:?}", self.viewer.selected_atoms()));
+                ui.label(format!("Selected atoms: {:?}", self.selected_atom_indices));
                 
                 ui.horizontal(|ui| {
                     ui.label("Render Style:");
@@ -471,12 +502,11 @@ impl eframe::App for KuromameApp {
             }
 
             // Render the molecule
-            let selected = self.viewer.selected_atoms();
             let view_proj = self.controller.camera.view_projection().data;
             if let Err(err) = self.offscreen.render_frame(
                 render_state,
                 self.viewer.molecule.as_ref(),
-                &selected,
+                &self.selected_atom_indices,
                 view_proj,
             ) {
                 ui.colored_label(egui::Color32::RED, format!("Offscreen render failed: {err}"));
@@ -542,10 +572,8 @@ impl eframe::App for KuromameApp {
 
                     if let Some(event) = self.viewer.pick(ray_origin, ray_dir) {
                         if let moleucle_3dview_rs::viewer::ViewerEvent::AtomClicked(i) = event {
-                            if let Some(renderer) = &mut self.viewer.additional_render {
-                                renderer.toggle_atom(i);
-                                self.viewer.dirty = true;
-                            }
+                            self.toggle_selected_atom(i);
+                            self.sync_selection_to_renderer();
                         }
                     }
                 }
