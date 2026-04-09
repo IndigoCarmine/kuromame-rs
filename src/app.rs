@@ -5,7 +5,6 @@ use moleucle_3dview_rs::{
     RenderStyle, SelectedAtomRender,
 };
 use crate::parsing::{AtomRecord, PdbFile};
-use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -48,6 +47,10 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
 }
 
 fn color_by_res_name(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
+    if _is_selected {
+        return (1.0, 0.0, 0.0);
+    }
+
     let key = atom
         .res_name
         .as_deref()
@@ -110,25 +113,43 @@ impl KuromameApp {
         self.viewer.dirty = true;
     }
 
-    fn toggle_selected_atom(&mut self, atom_index: usize) {
-        let mut targets = vec![atom_index];
-        if self.with_hbond_chk {
-            if let Some(mol) = &self.viewer.molecule {
-                targets.extend(Self::collect_connected_hydrogens(atom_index, mol));
-            }
+    fn toggle_selected_atom(&mut self, atom_index: usize) -> bool {
+        let was_selected = self.selected_atom_indices.contains(&atom_index);
+        if was_selected {
+            self.selected_atom_indices.retain(|&i| i != atom_index);
+        } else {
+            self.selected_atom_indices.push(atom_index);
         }
 
+        !was_selected
+    }
+
+    fn add_connected_hydrogens(&mut self, atom_index: usize) {
+        let Some(mol) = &self.viewer.molecule else {
+            return;
+        };
+
+        let mut targets = Self::collect_connected_hydrogens(atom_index, mol);
         targets.sort_unstable();
         targets.dedup();
 
-        let main_atom_is_selected = self.selected_atom_indices.contains(&atom_index);
         for idx in targets {
-            if main_atom_is_selected {
-                self.selected_atom_indices.retain(|&i| i != idx);
-            } else if !self.selected_atom_indices.contains(&idx) {
+            if !self.selected_atom_indices.contains(&idx) {
                 self.selected_atom_indices.push(idx);
             }
         }
+    }
+
+    fn remove_connected_hydrogens(&mut self, atom_index: usize) {
+        let Some(mol) = &self.viewer.molecule else {
+            return;
+        };
+
+        let mut targets = Self::collect_connected_hydrogens(atom_index, mol);
+        targets.sort_unstable();
+        targets.dedup();
+
+        self.selected_atom_indices.retain(|idx| !targets.contains(idx));
     }
 
     pub fn open_file(&mut self) {
@@ -163,8 +184,9 @@ impl KuromameApp {
             }
             "mol2" => {
                 if let Ok(mol) = Molecule::from_mol2(&path) {
+                    let pdb_from_mol2 = PdbFile::from_molecule(&mol);
                     self.viewer.set_molecule(mol);
-                    self.pdb_file = None;
+                    self.pdb_file = Some(pdb_from_mol2);
                     self.current_file_path = Some(path);
                     self.status_msg = "Loaded MOL2".to_string();
                 } else {
@@ -305,28 +327,22 @@ impl KuromameApp {
         // Find all atoms on all simple paths between start and end
         let atoms_on_path = Self::find_atoms_between_dfs(mol, start, end);
 
-        let mut selected_indices = atoms_on_path.clone();
-
-        // If H-bond check is on, collect connected hydrogens for each atom on path
-        if self.with_hbond_chk {
-            let mut hydrogens = Vec::new();
-            for &idx in &atoms_on_path {
-                hydrogens.extend(Self::collect_connected_hydrogens(idx, mol));
-            }
-            hydrogens.sort_unstable();
-            hydrogens.dedup();
-            // Avoid duplicates
-            for h in hydrogens {
-                if !selected_indices.contains(&h) {
-                    selected_indices.push(h);
-                }
-            }
-        }
-
-        // Toggle selected atoms in App state, then sync into renderer.
-        for idx in selected_indices {
+        // Toggle only the atoms on the path first.
+        for idx in atoms_on_path.iter().copied() {
             self.toggle_selected_atom(idx);
         }
+
+        if self.with_hbond_chk {
+            let selected_main_atoms: Vec<usize> = atoms_on_path
+                .into_iter()
+                .filter(|idx| self.selected_atom_indices.contains(idx))
+                .collect();
+
+            for idx in &selected_main_atoms {
+                self.add_connected_hydrogens(*idx);
+            }
+        }
+
         self.sync_selection_to_renderer();
     }
 
@@ -419,10 +435,14 @@ impl KuromameApp {
             return;
         }
         let new_name = format!("{:>3}", new_name); // Pad to 3 chars
+        let indices_to_update = self.selected_atom_indices.clone();
+
+        if indices_to_update.is_empty() {
+            self.status_msg = "No atoms selected".to_string();
+            return;
+        }
 
         if let Some(pdb) = &mut self.pdb_file {
-            let indices_to_update = self.selected_atom_indices.clone();
-
             // Update PDB atoms
             let mut atoms_vec: Vec<&mut AtomRecord> = pdb.atoms_mut().collect();
             for &idx in &indices_to_update {
@@ -430,20 +450,32 @@ impl KuromameApp {
                     atom.res_name = new_name.clone();
                 }
             }
-
-            // Update viewer
-            // We need to reload the molecule from updated PDB
-            let mol = pdb.to_molecule();
-            self.viewer.set_molecule(mol);
-
-            // Clear selection
-            self.selected_atom_indices.clear();
-            self.sync_selection_to_renderer();
-            self.status_msg = "Residue names updated".to_string();
         }
+
+        // Update viewer atoms in-place so we keep the original molecule graph
+        // (bond topology from loader/inference) and avoid disappearing geometry.
+        if let Some(mol) = &mut self.viewer.molecule {
+            for &idx in &indices_to_update {
+                if let Some(atom) = mol.atoms.get_mut(idx) {
+                    atom.res_name = Some(new_name.clone());
+                }
+            }
+        }
+        self.viewer.dirty = true;
+
+        // Clear selection
+        self.selected_atom_indices.clear();
+        self.sync_selection_to_renderer();
+        self.status_msg = "Residue names updated".to_string();
     }
 
     fn export_pdb(&mut self) {
+        if self.pdb_file.is_none() {
+            if let Some(mol) = &self.viewer.molecule {
+                self.pdb_file = Some(PdbFile::from_molecule(mol));
+            }
+        }
+
         if let Some(pdb) = &mut self.pdb_file {
             if let Some(path) = FileDialog::new()
                 .set_file_name("edited.pdb")
@@ -452,9 +484,13 @@ impl KuromameApp {
             {
                 let content = pdb.dump();
                 if std::fs::write(path, content).is_ok() {
-                    // Success
+                    self.status_msg = "Exported PDB".to_string();
+                } else {
+                    self.status_msg = "Failed to export PDB".to_string();
                 }
             }
+        } else {
+            self.status_msg = "No molecule loaded to export".to_string();
         }
     }
 }
@@ -508,6 +544,7 @@ impl eframe::App for KuromameApp {
                 self.viewer.molecule.as_ref(),
                 &self.selected_atom_indices,
                 view_proj,
+                self.viewer.color_fn,
             ) {
                 ui.colored_label(egui::Color32::RED, format!("Offscreen render failed: {err}"));
                 return;
@@ -526,6 +563,9 @@ impl eframe::App for KuromameApp {
                 ))
                 .sense(Sense::click_and_drag()),
             );
+
+            // Track hovered atom residue name for tooltip rendering.
+            let mut hovered_resname: Option<String> = None;
 
             // Handle mouse wheel for dolly
             if response.hovered() {
@@ -559,6 +599,35 @@ impl eframe::App for KuromameApp {
                 }
             }
 
+            // Handle hover picking for residue name tooltip.
+            if response.hovered() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let local = pointer - response.rect.min;
+                    let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
+                        local.x,
+                        local.y,
+                        response.rect.width().max(1.0),
+                        response.rect.height().max(1.0),
+                    );
+
+                    if let Some(event) = self.viewer.pick(ray_origin, ray_dir) {
+                        if let moleucle_3dview_rs::viewer::ViewerEvent::AtomClicked(i) = event {
+                            if let Some(mol) = &self.viewer.molecule {
+                                if let Some(atom) = mol.atoms.get(i) {
+                                    let resname = atom
+                                        .res_name
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or("-");
+                                    hovered_resname = Some(format!("resname: {}", resname));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle mouse click for atom picking
             if response.clicked_by(PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
@@ -572,11 +641,22 @@ impl eframe::App for KuromameApp {
 
                     if let Some(event) = self.viewer.pick(ray_origin, ray_dir) {
                         if let moleucle_3dview_rs::viewer::ViewerEvent::AtomClicked(i) = event {
-                            self.toggle_selected_atom(i);
+                            let selected_now = self.toggle_selected_atom(i);
+                            if self.with_hbond_chk {
+                                if selected_now {
+                                    self.add_connected_hydrogens(i);
+                                } else {
+                                    self.remove_connected_hydrogens(i);
+                                }
+                            }
                             self.sync_selection_to_renderer();
                         }
                     }
                 }
+            }
+
+            if let Some(label) = hovered_resname {
+                response.clone().on_hover_text(label);
             }
         });
 

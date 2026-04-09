@@ -57,7 +57,7 @@ impl PdbFile {
     pub fn load(content: &str) -> Self {
         let mut lines = Vec::new();
         for line in content.lines() {
-            if line.starts_with("ATOM") {
+            if line.starts_with("ATOM") || line.starts_with("HETATM") {
                 if let Some(atom) = AtomRecord::from_line(line) {
                     lines.push(PdbLine::Atom(atom));
                     continue;
@@ -153,6 +153,75 @@ impl PdbFile {
             }
         }
         hydrogens
+    }
+
+    pub fn from_molecule(molecule: &Molecule) -> Self {
+        let mut lines: Vec<PdbLine> = Vec::new();
+        lines.reserve(molecule.atoms.len() + molecule.bonds.len());
+
+        for (idx, atom) in molecule.atoms.iter().enumerate() {
+            let serial = idx + 1;
+            let name = atom
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| atom.element.clone());
+
+            let res_name = atom
+                .res_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "LIG".to_string());
+
+            let element = atom
+                .element
+                .trim()
+                .chars()
+                .take(2)
+                .collect::<String>()
+                .to_uppercase();
+
+            lines.push(PdbLine::Atom(AtomRecord {
+                serial,
+                name,
+                alt_loc: ' ',
+                res_name,
+                chain_id: atom.chain_id.unwrap_or('A'),
+                res_seq: atom.res_seq.unwrap_or(1),
+                i_code: ' ',
+                x: atom.position.x,
+                y: atom.position.y,
+                z: atom.position.z,
+                occupancy: atom.occupancy.unwrap_or(1.0),
+                temp_factor: atom.temp_factor.unwrap_or(0.0),
+                element,
+                charge: atom.charge.clone().unwrap_or_default(),
+            }));
+        }
+
+        let mut bonded_by_atom: HashMap<usize, Vec<usize>> = HashMap::new();
+        for bond in &molecule.bonds {
+            let a = bond.atom_a + 1;
+            let b = bond.atom_b + 1;
+            bonded_by_atom.entry(a).or_default().push(b);
+            bonded_by_atom.entry(b).or_default().push(a);
+        }
+
+        let mut serials: Vec<usize> = bonded_by_atom.keys().copied().collect();
+        serials.sort_unstable();
+        for serial in serials {
+            if let Some(mut bonded) = bonded_by_atom.remove(&serial) {
+                bonded.sort_unstable();
+                bonded.dedup();
+                lines.push(PdbLine::Conect(ConectRecord { serial, bonded }));
+            }
+        }
+
+        Self { lines }
     }
 }
 
