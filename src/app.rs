@@ -4,7 +4,8 @@ use moleucle_3dview_rs::{
     camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle, SelectedAtomRender,
 };
-use crate::parsing::{AtomRecord, PdbFile};
+use crate::parsing::{AtomRecord, GroFile, PdbFile};
+use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -74,6 +75,7 @@ pub struct KuromameApp {
 
     // Data state
     pub pdb_file: Option<PdbFile>,
+    pub gro_file: Option<GroFile>,
     pub current_file_path: Option<PathBuf>,
 
     // Selection state
@@ -98,6 +100,7 @@ impl KuromameApp {
             offscreen: OffscreenRenderer::new(),
             render_state: cc.wgpu_render_state.clone(),
             pdb_file: None,
+            gro_file: None,
             current_file_path: None,
             with_hbond_chk: false,
             selected_atom_indices: Vec::new(),
@@ -156,6 +159,7 @@ impl KuromameApp {
         if let Some(path) = FileDialog::new()
             .add_filter("PDB Files", &["pdb", "ent", "cif"])
             .add_filter("MOL2 Files", &["mol2"])
+            .add_filter("GRO Files", &["gro"])
             .pick_file()
         {
             self.load_file(path);
@@ -174,6 +178,7 @@ impl KuromameApp {
                     Ok(mol) => {
                         self.viewer.set_molecule(mol);
                         self.pdb_file = std::fs::read_to_string(&path).ok().map(|content| PdbFile::load(&content));
+                        self.gro_file = None;
                         self.current_file_path = Some(path);
                         self.status_msg = "Loaded PDB".to_string();
                     }
@@ -187,10 +192,27 @@ impl KuromameApp {
                     let pdb_from_mol2 = PdbFile::from_molecule(&mol);
                     self.viewer.set_molecule(mol);
                     self.pdb_file = Some(pdb_from_mol2);
+                    self.gro_file = None;
                     self.current_file_path = Some(path);
                     self.status_msg = "Loaded MOL2".to_string();
                 } else {
                     self.status_msg = "Failed to load MOL2 file".to_string();
+                }
+            }
+            "gro" => {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let gro = GroFile::load(&content);
+                        let mol = gro.to_molecule();
+                        self.viewer.set_molecule(mol);
+                        self.gro_file = Some(gro);
+                        self.pdb_file = None;
+                        self.current_file_path = Some(path);
+                        self.status_msg = "Loaded GRO".to_string();
+                    }
+                    Err(_) => {
+                        self.status_msg = "Failed to load GRO file".to_string();
+                    }
                 }
             }
             _ => {
@@ -240,7 +262,7 @@ impl KuromameApp {
             .default_width(300.0)
             .show(ctx, |ui| {
                 ui.heading("Controls");
-                if ui.button("Open Molecule File (PDB/MOL2)").clicked() {
+                if ui.button("Open Molecule File (PDB/MOL2/GRO)").clicked() {
                     self.open_file();
                 }
 
@@ -279,8 +301,24 @@ impl KuromameApp {
                                     ui.label(format!("Index {} out of bounds", idx));
                                 }
                             }
+                        } else if let Some(gro) = &self.gro_file {
+                            let atoms_vec: Vec<_> = gro.atoms().collect();
+
+                            for &idx in &selected_indices {
+                                if let Some(atom) = atoms_vec.get(idx) {
+                                    ui.label(format!(
+                                        "{} {} {} {}",
+                                        atom.atom_id,
+                                        atom.atom_name,
+                                        atom.res_name,
+                                        atom.res_num,
+                                    ));
+                                } else {
+                                    ui.label(format!("Index {} out of bounds", idx));
+                                }
+                            }
                         } else {
-                            ui.label("No PDB loaded to map indices");
+                            ui.label("No structure loaded to map indices");
                         }
                     });
 
@@ -311,8 +349,8 @@ impl KuromameApp {
                     self.new_res_name = "ALA".to_string(); // default
                 }
 
-                if ui.button("Export PDB (Save)").clicked() {
-                    self.export_pdb();
+                if ui.button("Export (Save)").clicked() {
+                    self.export_structure();
                 }
 
                 ui.label(&self.status_msg);
@@ -452,6 +490,16 @@ impl KuromameApp {
             }
         }
 
+        if let Some(gro) = &mut self.gro_file {
+            // In GRO, the 2nd field is residue name (resname).
+            let mut atoms_vec: Vec<_> = gro.atoms_mut().collect();
+            for &idx in &indices_to_update {
+                if let Some(atom) = atoms_vec.get_mut(idx) {
+                    atom.res_name = new_name.clone();
+                }
+            }
+        }
+
         // Update viewer atoms in-place so we keep the original molecule graph
         // (bond topology from loader/inference) and avoid disappearing geometry.
         if let Some(mol) = &mut self.viewer.molecule {
@@ -469,14 +517,27 @@ impl KuromameApp {
         self.status_msg = "Residue names updated".to_string();
     }
 
-    fn export_pdb(&mut self) {
-        if self.pdb_file.is_none() {
+    fn export_structure(&mut self) {
+        if self.gro_file.is_none() && self.pdb_file.is_none() {
             if let Some(mol) = &self.viewer.molecule {
                 self.pdb_file = Some(PdbFile::from_molecule(mol));
             }
         }
 
-        if let Some(pdb) = &mut self.pdb_file {
+        if let Some(gro) = &self.gro_file {
+            if let Some(path) = FileDialog::new()
+                .set_file_name("edited.gro")
+                .add_filter("GRO", &["gro"])
+                .save_file()
+            {
+                let content = gro.dump();
+                if std::fs::write(path, content).is_ok() {
+                    self.status_msg = "Exported GRO".to_string();
+                } else {
+                    self.status_msg = "Failed to export GRO".to_string();
+                }
+            }
+        } else if let Some(pdb) = &mut self.pdb_file {
             if let Some(path) = FileDialog::new()
                 .set_file_name("edited.pdb")
                 .add_filter("PDB", &["pdb"])
@@ -503,7 +564,7 @@ impl eframe::App for KuromameApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
-                ui.label("Drop a PDB/MOL2 file anywhere in the window to load it");
+                ui.label("Drop a PDB/MOL2/GRO file anywhere in the window to load it");
                 ui.label(format!("Selected atoms: {:?}", self.selected_atom_indices));
                 
                 ui.horizontal(|ui| {

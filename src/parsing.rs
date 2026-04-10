@@ -272,6 +272,243 @@ impl To3dViewMolecule for PdbFile {
     }
 }
 
+// --- GRO Structures ---
+
+#[derive(Debug, Clone)]
+pub struct GroAtomRecord {
+    pub res_num: i32,
+    pub res_name: String,
+    pub atom_name: String,
+    pub atom_id: usize,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub velocity: Option<(f32, f32, f32)>,
+}
+
+impl GroAtomRecord {
+    pub fn from_line(line: &str) -> Option<Self> {
+        let res_num = line.get(0..5)?.trim().parse().ok()?;
+        let res_name = line.get(5..10)?.trim().to_string();
+        let atom_name = line.get(10..15)?.trim().to_string();
+        let atom_id = line.get(15..20)?.trim().parse().ok()?;
+        let x = line.get(20..28)?.trim().parse().ok()?;
+        let y = line.get(28..36)?.trim().parse().ok()?;
+        let z = line.get(36..44)?.trim().parse().ok()?;
+
+        let velocity = if line.len() >= 68 {
+            match (
+                line.get(44..52).and_then(|s| s.trim().parse().ok()),
+                line.get(52..60).and_then(|s| s.trim().parse().ok()),
+                line.get(60..68).and_then(|s| s.trim().parse().ok()),
+            ) {
+                (Some(vx), Some(vy), Some(vz)) => Some((vx, vy, vz)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        Some(Self {
+            res_num,
+            res_name,
+            atom_name,
+            atom_id,
+            x,
+            y,
+            z,
+            velocity,
+        })
+    }
+
+    pub fn to_line(&self) -> String {
+        if let Some((vx, vy, vz)) = self.velocity {
+            format!(
+                "{:>5}{:>5}{:>5}{:>5}{:>8.3}{:>8.3}{:>8.3}{:>8.4}{:>8.4}{:>8.4}",
+                self.res_num,
+                self.res_name,
+                self.atom_name,
+                self.atom_id,
+                self.x,
+                self.y,
+                self.z,
+                vx,
+                vy,
+                vz
+            )
+        } else {
+            format!(
+                "{:>5}{:>5}{:>5}{:>5}{:>8.3}{:>8.3}{:>8.3}",
+                self.res_num,
+                self.res_name,
+                self.atom_name,
+                self.atom_id,
+                self.x,
+                self.y,
+                self.z
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GroFile {
+    pub title: String,
+    pub atom_count_line: String,
+    pub atoms: Vec<GroAtomRecord>,
+    pub box_line: String,
+}
+
+impl GroFile {
+    pub fn load(content: &str) -> Self {
+        let mut iter = content.lines();
+        let title = iter.next().unwrap_or("").to_string();
+        let atom_count_line = iter.next().unwrap_or("").to_string();
+        let _declared_atom_count = atom_count_line.trim().parse::<usize>().unwrap_or(0);
+
+        let body_lines: Vec<&str> = iter.collect();
+        if body_lines.is_empty() {
+            return Self {
+                title,
+                atom_count_line,
+                atoms: Vec::new(),
+                box_line: String::new(),
+            };
+        }
+
+        let box_line = body_lines.last().unwrap_or(&"").to_string();
+        let atom_lines = &body_lines[..body_lines.len().saturating_sub(1)];
+        let mut atoms = Vec::new();
+        for line in atom_lines {
+            if let Some(atom) = GroAtomRecord::from_line(line) {
+                atoms.push(atom);
+            }
+        }
+
+        Self {
+            title,
+            atom_count_line,
+            atoms,
+            box_line,
+        }
+    }
+
+    pub fn dump(&self) -> String {
+        let mut out = String::new();
+        writeln!(out, "{}", self.title).unwrap();
+        if self.atom_count_line.trim().parse::<usize>().ok() == Some(self.atoms.len()) {
+            writeln!(out, "{}", self.atom_count_line).unwrap();
+        } else {
+            writeln!(out, "{:>5}", self.atoms.len()).unwrap();
+        }
+        for atom in &self.atoms {
+            writeln!(out, "{}", atom.to_line()).unwrap();
+        }
+        writeln!(out, "{}", self.box_line).unwrap();
+        out
+    }
+
+    pub fn atoms(&self) -> impl Iterator<Item = &GroAtomRecord> {
+        self.atoms.iter()
+    }
+
+    pub fn atoms_mut(&mut self) -> impl Iterator<Item = &mut GroAtomRecord> {
+        self.atoms.iter_mut()
+    }
+
+    fn infer_element(atom_name: &str) -> String {
+        let mut chars = atom_name.trim().chars().filter(|c| c.is_ascii_alphabetic());
+        let first = chars.next();
+        let second = chars.next();
+
+        match (first, second) {
+            (Some(a), Some(b)) => format!("{}{}", a, b).to_uppercase(),
+            (Some(a), None) => a.to_string().to_uppercase(),
+            _ => "X".to_string(),
+        }
+    }
+
+    fn covalent_radius_angstrom(element: &str) -> f32 {
+        match element.trim().to_uppercase().as_str() {
+            "H" => 0.31,
+            "C" => 0.76,
+            "N" => 0.71,
+            "O" => 0.66,
+            "F" => 0.57,
+            "P" => 1.07,
+            "S" => 1.05,
+            "CL" => 1.02,
+            "BR" => 1.20,
+            "I" => 1.39,
+            _ => 0.77,
+        }
+    }
+
+    fn infer_single_bonds_from_distance(atoms: &[Atom]) -> Vec<Bond> {
+        let mut bonds = Vec::new();
+
+        // Generous tolerance for coordinate noise and coarse input structures.
+        const EXTRA_TOLERANCE: f32 = 0.45;
+        const MIN_DISTANCE: f32 = 0.4;
+
+        for i in 0..atoms.len() {
+            for j in (i + 1)..atoms.len() {
+                let delta = atoms[j].position - atoms[i].position;
+                let distance =
+                    (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+                if distance < MIN_DISTANCE {
+                    continue;
+                }
+
+                let ri = Self::covalent_radius_angstrom(&atoms[i].element);
+                let rj = Self::covalent_radius_angstrom(&atoms[j].element);
+                let max_bond_distance = ri + rj + EXTRA_TOLERANCE;
+
+                if distance <= max_bond_distance {
+                    bonds.push(Bond {
+                        atom_a: i,
+                        atom_b: j,
+                        order: 1,
+                    });
+                }
+            }
+        }
+
+        bonds
+    }
+}
+
+impl To3dViewMolecule for GroFile {
+    fn to_molecule(&self) -> Molecule {
+        const GRO_TO_VIEW_SCALE: f32 = 10.0;
+
+        let atoms = self
+            .atoms()
+            .enumerate()
+            .map(|(idx, atom)| Atom {
+                position: Vec3::new(
+                    atom.x * GRO_TO_VIEW_SCALE,
+                    atom.y * GRO_TO_VIEW_SCALE,
+                    atom.z * GRO_TO_VIEW_SCALE,
+                ),
+                element: Self::infer_element(&atom.atom_name),
+                id: idx,
+                name: Some(atom.atom_name.clone()),
+                res_name: Some(atom.res_name.clone()),
+                chain_id: Some('A'),
+                res_seq: Some(atom.res_num),
+                occupancy: None,
+                temp_factor: None,
+                charge: None,
+            })
+            .collect::<Vec<_>>();
+
+        let bonds = Self::infer_single_bonds_from_distance(&atoms);
+
+        Molecule { atoms, bonds }
+    }
+}
+
 // --- Mol2 Structures ---
 
 #[derive(Debug, Clone)]
