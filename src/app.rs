@@ -5,7 +5,6 @@ use moleucle_3dview_rs::{
     RenderStyle, SelectedAtomRender,
 };
 use crate::parsing::{AtomRecord, GroFile, PdbFile};
-use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -200,15 +199,24 @@ impl KuromameApp {
                 }
             }
             "gro" => {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let gro = GroFile::load(&content);
-                        let mol = gro.to_molecule();
+                const LARGE_GRO_THRESHOLD_BYTES: u64 = 20 * 1024 * 1024;
+                let large_gro = std::fs::metadata(&path)
+                    .map(|m| m.len() >= LARGE_GRO_THRESHOLD_BYTES)
+                    .unwrap_or(false);
+
+                match GroFile::load_from_path(&path) {
+                    Ok(gro) => {
+                        let mol = gro.to_molecule_with_metadata(!large_gro);
                         self.set_molecule_and_frame(mol);
-                        self.gro_file = Some(gro);
+                        self.gro_file = if large_gro { None } else { Some(gro) };
                         self.pdb_file = None;
                         self.current_file_path = Some(path);
-                        self.status_msg = "Loaded GRO".to_string();
+                        self.status_msg = if large_gro {
+                            "Loaded GRO (compact mode: reduced memory, GRO edit/export disabled)"
+                                .to_string()
+                        } else {
+                            "Loaded GRO".to_string()
+                        };
                     }
                     Err(_) => {
                         self.status_msg = "Failed to load GRO file".to_string();
@@ -349,8 +357,8 @@ impl KuromameApp {
                                     ui.label(format!(
                                         "{} {} {} {}",
                                         atom.atom_id,
-                                        atom.atom_name,
-                                        atom.res_name,
+                                        atom.atom_name.trimmed(),
+                                        atom.res_name.trimmed(),
                                         atom.res_num,
                                     ));
                                 } else {
@@ -535,7 +543,7 @@ impl KuromameApp {
             let mut atoms_vec: Vec<_> = gro.atoms_mut().collect();
             for &idx in &indices_to_update {
                 if let Some(atom) = atoms_vec.get_mut(idx) {
-                    atom.res_name = new_name.clone();
+                    atom.set_res_name(&new_name);
                 }
             }
         }

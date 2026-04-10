@@ -7,6 +7,8 @@ pub use moleucle_3dview_rs::AtomRecord;
 use lin_alg::f32::Vec3;
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
 // --- PDB Structures ---
 
@@ -274,40 +276,56 @@ impl To3dViewMolecule for PdbFile {
 
 // --- GRO Structures ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GroFixed5([u8; 5]);
+
+impl GroFixed5 {
+    fn from_field(field: &str) -> Self {
+        let mut out = [b' '; 5];
+        let bytes = field.as_bytes();
+        let n = bytes.len().min(5);
+        out[..n].copy_from_slice(&bytes[..n]);
+        Self(out)
+    }
+
+    fn from_left_aligned(value: &str) -> Self {
+        let mut out = [b' '; 5];
+        let trimmed = value.trim();
+        let bytes = trimmed.as_bytes();
+        let n = bytes.len().min(5);
+        out[..n].copy_from_slice(&bytes[..n]);
+        Self(out)
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or("     ")
+    }
+
+    pub fn trimmed(&self) -> &str {
+        self.as_str().trim()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GroAtomRecord {
     pub res_num: i32,
-    pub res_name: String,
-    pub atom_name: String,
+    pub res_name: GroFixed5,
+    pub atom_name: GroFixed5,
     pub atom_id: usize,
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub velocity: Option<(f32, f32, f32)>,
 }
 
 impl GroAtomRecord {
     pub fn from_line(line: &str) -> Option<Self> {
         let res_num = line.get(0..5)?.trim().parse().ok()?;
-        let res_name = line.get(5..10)?.trim().to_string();
-        let atom_name = line.get(10..15)?.trim().to_string();
+        let res_name = GroFixed5::from_field(line.get(5..10)?);
+        let atom_name = GroFixed5::from_field(line.get(10..15)?);
         let atom_id = line.get(15..20)?.trim().parse().ok()?;
         let x = line.get(20..28)?.trim().parse().ok()?;
         let y = line.get(28..36)?.trim().parse().ok()?;
         let z = line.get(36..44)?.trim().parse().ok()?;
-
-        let velocity = if line.len() >= 68 {
-            match (
-                line.get(44..52).and_then(|s| s.trim().parse().ok()),
-                line.get(52..60).and_then(|s| s.trim().parse().ok()),
-                line.get(60..68).and_then(|s| s.trim().parse().ok()),
-            ) {
-                (Some(vx), Some(vy), Some(vz)) => Some((vx, vy, vz)),
-                _ => None,
-            }
-        } else {
-            None
-        };
 
         Some(Self {
             res_num,
@@ -317,37 +335,24 @@ impl GroAtomRecord {
             x,
             y,
             z,
-            velocity,
         })
     }
 
+    pub fn set_res_name(&mut self, value: &str) {
+        self.res_name = GroFixed5::from_left_aligned(value);
+    }
+
     pub fn to_line(&self) -> String {
-        if let Some((vx, vy, vz)) = self.velocity {
-            format!(
-                "{:>5}{:>5}{:>5}{:>5}{:>8.3}{:>8.3}{:>8.3}{:>8.4}{:>8.4}{:>8.4}",
-                self.res_num,
-                self.res_name,
-                self.atom_name,
-                self.atom_id,
-                self.x,
-                self.y,
-                self.z,
-                vx,
-                vy,
-                vz
-            )
-        } else {
-            format!(
-                "{:>5}{:>5}{:>5}{:>5}{:>8.3}{:>8.3}{:>8.3}",
-                self.res_num,
-                self.res_name,
-                self.atom_name,
-                self.atom_id,
-                self.x,
-                self.y,
-                self.z
-            )
-        }
+        format!(
+            "{:>5}{}{}{:>5}{:>8.3}{:>8.3}{:>8.3}",
+            self.res_num,
+            self.res_name.as_str(),
+            self.atom_name.as_str(),
+            self.atom_id,
+            self.x,
+            self.y,
+            self.z
+        )
     }
 }
 
@@ -387,6 +392,42 @@ impl GroFile {
             atoms,
             box_line,
         }
+    }
+
+    pub fn load_from_reader<R: BufRead>(reader: R) -> io::Result<Self> {
+        let mut iter = reader.lines();
+        let title = iter.next().transpose()?.unwrap_or_default();
+        let atom_count_line = iter.next().transpose()?.unwrap_or_default();
+        let declared_atom_count = atom_count_line.trim().parse::<usize>().unwrap_or(0);
+
+        let mut atoms = Vec::with_capacity(declared_atom_count);
+        let mut box_line = String::new();
+
+        for line in iter {
+            let line = line?;
+            if box_line.is_empty() && !line.trim().is_empty() {
+                if let Some(atom) = GroAtomRecord::from_line(&line) {
+                    atoms.push(atom);
+                } else {
+                    box_line = line;
+                }
+            } else if !box_line.is_empty() {
+                box_line = line;
+            }
+        }
+
+        Ok(Self {
+            title,
+            atom_count_line,
+            atoms,
+            box_line,
+        })
+    }
+
+    pub fn load_from_path(path: &std::path::Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        Self::load_from_reader(reader)
     }
 
     pub fn dump(&self) -> String {
@@ -497,8 +538,8 @@ impl GroFile {
     }
 }
 
-impl To3dViewMolecule for GroFile {
-    fn to_molecule(&self) -> Molecule {
+impl GroFile {
+    pub fn to_molecule_with_metadata(&self, include_metadata: bool) -> Molecule {
         const GRO_TO_VIEW_SCALE: f32 = 10.0;
 
         let atoms = self
@@ -510,10 +551,18 @@ impl To3dViewMolecule for GroFile {
                     atom.y * GRO_TO_VIEW_SCALE,
                     atom.z * GRO_TO_VIEW_SCALE,
                 ),
-                element: Self::infer_element(&atom.atom_name),
+                element: Self::infer_element(atom.atom_name.trimmed()),
                 id: idx,
-                name: Some(atom.atom_name.clone()),
-                res_name: Some(atom.res_name.clone()),
+                name: if include_metadata {
+                    Some(atom.atom_name.trimmed().to_string())
+                } else {
+                    None
+                },
+                res_name: if include_metadata {
+                    Some(atom.res_name.trimmed().to_string())
+                } else {
+                    None
+                },
                 chain_id: Some('A'),
                 res_seq: Some(atom.res_num),
                 occupancy: None,
@@ -522,9 +571,15 @@ impl To3dViewMolecule for GroFile {
             })
             .collect::<Vec<_>>();
 
-        let bonds = Self::infer_single_bonds_from_distance(&atoms);
+        // let bonds = Self::infer_single_bonds_from_distance(&atoms);
 
-        Molecule { atoms, bonds }
+        Molecule { atoms, bonds: Vec::new() }
+    }
+}
+
+impl To3dViewMolecule for GroFile {
+    fn to_molecule(&self) -> Molecule {
+        self.to_molecule_with_metadata(true)
     }
 }
 
