@@ -364,24 +364,20 @@ impl GroFile {
         let mut iter = content.lines();
         let title = iter.next().unwrap_or("").to_string();
         let atom_count_line = iter.next().unwrap_or("").to_string();
-        let _declared_atom_count = atom_count_line.trim().parse::<usize>().unwrap_or(0);
+        let declared_atom_count = atom_count_line.trim().parse::<usize>().unwrap_or(0);
 
-        let body_lines: Vec<&str> = iter.collect();
-        if body_lines.is_empty() {
-            return Self {
-                title,
-                atom_count_line,
-                atoms: Vec::new(),
-                box_line: String::new(),
-            };
-        }
+        let mut atoms = Vec::with_capacity(declared_atom_count);
+        let mut box_line = String::new();
 
-        let box_line = body_lines.last().unwrap_or(&"").to_string();
-        let atom_lines = &body_lines[..body_lines.len().saturating_sub(1)];
-        let mut atoms = Vec::new();
-        for line in atom_lines {
+        for line in iter {
+            if box_line.is_empty() && !line.trim().is_empty() {
             if let Some(atom) = GroAtomRecord::from_line(line) {
                 atoms.push(atom);
+            } else {
+                box_line = line.to_string();
+            }
+            } else if !box_line.is_empty() {
+            box_line = line.to_string();
             }
         }
 
@@ -449,29 +445,52 @@ impl GroFile {
 
         // Generous tolerance for coordinate noise and coarse input structures.
         const EXTRA_TOLERANCE: f32 = 0.45;
-        const MIN_DISTANCE: f32 = 0.4;
+        const MIN_DISTANCE_2: f32 = 0.4 * 0.4; // Minimum distance squared to avoid false positives
+        const MAX_COVALENT_RADIUS: f32 = 1.39;
+        const CELL_SIZE: f32 = MAX_COVALENT_RADIUS * 2.0 + EXTRA_TOLERANCE;
+        const CELL_SIZE_INV: f32 = 1.0 / CELL_SIZE;
 
-        for i in 0..atoms.len() {
-            for j in (i + 1)..atoms.len() {
-                let delta = atoms[j].position - atoms[i].position;
-                let distance =
-                    (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
-                if distance < MIN_DISTANCE {
-                    continue;
-                }
+        let mut spatial_index: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
 
-                let ri = Self::covalent_radius_angstrom(&atoms[i].element);
-                let rj = Self::covalent_radius_angstrom(&atoms[j].element);
-                let max_bond_distance = ri + rj + EXTRA_TOLERANCE;
+        for (i, atom) in atoms.iter().enumerate() {
+            let cell = (
+                (atom.position.x * CELL_SIZE_INV).floor() as i32,
+                (atom.position.y * CELL_SIZE_INV).floor() as i32,
+                (atom.position.z * CELL_SIZE_INV).floor() as i32,
+            );
 
-                if distance <= max_bond_distance {
-                    bonds.push(Bond {
-                        atom_a: i,
-                        atom_b: j,
-                        order: 1,
-                    });
+            let ri = Self::covalent_radius_angstrom(&atom.element);
+
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(candidate_indices) =
+                            spatial_index.get(&(cell.0 + dx, cell.1 + dy, cell.2 + dz))
+                        {
+                            for &j in candidate_indices {
+                                let delta = atoms[j].position - atom.position;
+                                let distance =
+                                    delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+                                if distance < MIN_DISTANCE_2 {
+                                    continue;
+                                }
+
+                                let rj = Self::covalent_radius_angstrom(&atoms[j].element);
+                                let max_bond_distance = ri + rj + EXTRA_TOLERANCE;
+                                if distance <= max_bond_distance * max_bond_distance {
+                                    bonds.push(Bond {
+                                        atom_a: j,
+                                        atom_b: i,
+                                        order: 1,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
+
+            spatial_index.entry(cell).or_default().push(i);
         }
 
         bonds

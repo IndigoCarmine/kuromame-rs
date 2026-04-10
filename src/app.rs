@@ -1,5 +1,5 @@
 use eframe::egui::{self, PointerButton, Sense};
-use lin_alg::f32::Vec2;
+use lin_alg::f32::{Vec2, Vec3};
 use moleucle_3dview_rs::{
     camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle, SelectedAtomRender,
@@ -176,7 +176,7 @@ impl KuromameApp {
             "pdb" | "ent" => {
                 match Molecule::from_pdb(&path) {
                     Ok(mol) => {
-                        self.viewer.set_molecule(mol);
+                        self.set_molecule_and_frame(mol);
                         self.pdb_file = std::fs::read_to_string(&path).ok().map(|content| PdbFile::load(&content));
                         self.gro_file = None;
                         self.current_file_path = Some(path);
@@ -190,7 +190,7 @@ impl KuromameApp {
             "mol2" => {
                 if let Ok(mol) = Molecule::from_mol2(&path) {
                     let pdb_from_mol2 = PdbFile::from_molecule(&mol);
-                    self.viewer.set_molecule(mol);
+                    self.set_molecule_and_frame(mol);
                     self.pdb_file = Some(pdb_from_mol2);
                     self.gro_file = None;
                     self.current_file_path = Some(path);
@@ -204,7 +204,7 @@ impl KuromameApp {
                     Ok(content) => {
                         let gro = GroFile::load(&content);
                         let mol = gro.to_molecule();
-                        self.viewer.set_molecule(mol);
+                        self.set_molecule_and_frame(mol);
                         self.gro_file = Some(gro);
                         self.pdb_file = None;
                         self.current_file_path = Some(path);
@@ -224,6 +224,46 @@ impl KuromameApp {
             *renderer = Box::new(SelectedAtomRender::new());
         }
         self.selected_atom_indices.clear();
+    }
+
+    fn set_molecule_and_frame(&mut self, molecule: Molecule) {
+        self.viewer.set_molecule(molecule);
+
+        let Some(mol) = self.viewer.molecule.as_ref() else {
+            return;
+        };
+
+        if mol.atoms.is_empty() {
+            return;
+        }
+
+        let mut min = mol.atoms[0].position;
+        let mut max = mol.atoms[0].position;
+
+        for atom in &mol.atoms[1..] {
+            min.x = min.x.min(atom.position.x);
+            min.y = min.y.min(atom.position.y);
+            min.z = min.z.min(atom.position.z);
+            max.x = max.x.max(atom.position.x);
+            max.y = max.y.max(atom.position.y);
+            max.z = max.z.max(atom.position.z);
+        }
+
+        let center = (min + max) * 0.5;
+        let radius = (max - min).magnitude() * 0.5;
+        let camera_radius = if radius > 0.0 {
+            let fit_distance = radius / (self.controller.camera.fov_y() * 0.5).tan();
+            fit_distance.max(10.0) * 1.2
+        } else {
+            10.0
+        };
+
+        self.controller.camera.look_at(
+            center + Vec3::new(0.0, 0.0, camera_radius),
+            center,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        self.controller.camera.far = camera_radius + radius * 2.0 + 10.0;
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {

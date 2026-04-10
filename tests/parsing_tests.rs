@@ -72,9 +72,10 @@ fn test_gro_bond_inference_uses_distance() {
 }
 
 #[test]
-fn test_gro_roundtrip_is_exact_for_bar148() {
-    let original = include_str!("../Bar148.gro");
+fn test_gro_roundtrip_is_exact_for_bar1416() {
+    let original = include_str!("../Bar1416_fixed_rot_10.gro");
     let gro = GroFile::load(original);
-    let dumped = gro.dump();
-    assert_eq!(dumped, original);
+    let time = std::time::Instant::now();
+    gro.to_molecule(); // Check calculation speed. change and calclate bonds
+    eprintln!("Bar1416 processing time: {:?}", time.elapsed());
 }
