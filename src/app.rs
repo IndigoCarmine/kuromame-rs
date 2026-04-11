@@ -46,8 +46,8 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     )
 }
 
-fn color_by_res_name(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
-    if _is_selected {
+fn color_by_res_name(atom: &Atom, is_selected: bool) -> (f32, f32, f32) {
+    if is_selected {
         return (1.0, 0.0, 0.0);
     }
 
@@ -105,7 +105,7 @@ impl KuromameApp {
             selected_atom_indices: Vec::new(),
             status_msg: "Ready".to_string(),
             show_edit_dialog: false,
-            new_res_name: "".to_string(),
+            new_res_name: String::new(),
         }
     }
 
@@ -275,15 +275,14 @@ impl KuromameApp {
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped_paths: Vec<PathBuf> = ctx.input(|i| {
+        let dropped_path = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|file| file.path.clone())
-                .collect()
+                .find_map(|file| file.path.clone())
         });
 
-        if let Some(path) = dropped_paths.into_iter().next() {
+        if let Some(path) = dropped_path {
             self.load_file(path);
         }
     }
@@ -419,13 +418,10 @@ impl KuromameApp {
         }
 
         if self.with_hbond_chk {
-            let selected_main_atoms: Vec<usize> = atoms_on_path
-                .into_iter()
-                .filter(|idx| self.selected_atom_indices.contains(idx))
-                .collect();
-
-            for idx in &selected_main_atoms {
-                self.add_connected_hydrogens(*idx);
+            for idx in atoms_on_path {
+                if self.selected_atom_indices.contains(&idx) {
+                    self.add_connected_hydrogens(idx);
+                }
             }
         }
 
@@ -443,10 +439,10 @@ impl KuromameApp {
 
         for bond in &mol.bonds {
             adj.entry(bond.atom_a)
-                .or_insert_with(std::collections::HashSet::new)
+                .or_default()
                 .insert(bond.atom_b);
             adj.entry(bond.atom_b)
-                .or_insert_with(std::collections::HashSet::new)
+                .or_default()
                 .insert(bond.atom_a);
         }
 

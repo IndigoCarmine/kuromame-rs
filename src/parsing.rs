@@ -571,7 +571,7 @@ impl GroFile {
             })
             .collect::<Vec<_>>();
 
-        // let bonds = Self::infer_single_bonds_from_distance(&atoms);
+        let bonds = Self::infer_single_bonds_from_distance(&atoms);
 
         Molecule { atoms, bonds: Vec::new() }
     }
