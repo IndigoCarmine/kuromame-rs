@@ -4,7 +4,8 @@ use moleucle_3dview_rs::{
     camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle, SelectedAtomRender,
 };
-use crate::parsing::{AtomRecord, GroFile, PdbFile, TopFile};
+use crate::parsing::{AtomRecord, GroFile, Mol2File, PdbFile, TopFile};
+use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -236,10 +237,12 @@ impl KuromameApp {
 
         match ext.to_lowercase().as_str() {
             "pdb" | "ent" => {
-                match Molecule::from_pdb(&path) {
-                    Ok(mol) => {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let pdb = PdbFile::load(&content);
+                        let mol = pdb.to_molecule();
                         self.set_molecule_and_frame(mol);
-                        self.pdb_file = std::fs::read_to_string(&path).ok().map(|content| PdbFile::load(&content));
+                        self.pdb_file = Some(pdb);
                         self.gro_file = None;
                         self.current_file_path = Some(path);
                         self.status_msg = "Loaded PDB".to_string();
@@ -250,7 +253,9 @@ impl KuromameApp {
                 }
             }
             "mol2" => {
-                if let Ok(mol) = Molecule::from_mol2(&path) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let mol2 = Mol2File::load(&content);
+                    let mol = mol2.to_molecule();
                     let pdb_from_mol2 = PdbFile::from_molecule(&mol);
                     self.set_molecule_and_frame(mol);
                     self.pdb_file = Some(pdb_from_mol2);

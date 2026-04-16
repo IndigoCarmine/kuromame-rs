@@ -9,6 +9,9 @@ use std::fmt::Write;
 
 use super::AtomRecord;
 
+const ANGSTROM_TO_NM: f32 = 0.1;
+const NM_TO_ANGSTROM: f32 = 10.0;
+
 // --- PDB Structures ---
 
 #[derive(Debug, Clone)]
@@ -186,9 +189,9 @@ impl PdbFile {
                 chain_id: atom.chain_id.unwrap_or('A'),
                 res_seq: atom.res_seq.unwrap_or(1),
                 i_code: ' ',
-                x: atom.position.x,
-                y: atom.position.y,
-                z: atom.position.z,
+                x: atom.position.x * NM_TO_ANGSTROM,
+                y: atom.position.y * NM_TO_ANGSTROM,
+                z: atom.position.z * NM_TO_ANGSTROM,
                 occupancy: atom.occupancy.unwrap_or(1.0),
                 temp_factor: atom.temp_factor.unwrap_or(0.0),
                 element,
@@ -228,7 +231,11 @@ impl To3dViewMolecule for PdbFile {
         for (i, record) in self.atoms().enumerate() {
             serial_to_index.insert(record.serial, i);
             atoms.push(Atom {
-                position: Vec3::new(record.x, record.y, record.z),
+                position: Vec3::new(
+                    record.x * ANGSTROM_TO_NM,
+                    record.y * ANGSTROM_TO_NM,
+                    record.z * ANGSTROM_TO_NM,
+                ),
                 element: record.element.clone(),
                 id: i,
                 name: Some(record.name.clone()),

@@ -12,7 +12,6 @@ use std::io::{self, BufRead, BufReader};
 // Gromacs GRO coordinates and box vectors are represented in nanometers.
 #[allow(dead_code)]
 pub const GROMACS_LENGTH_UNIT: &str = "nm";
-pub const ANGSTROM_TO_NM: f32 = 0.1;
 
 // --- GRO Structures ---
 
@@ -207,29 +206,28 @@ impl GroFile {
     }
 
     fn covalent_radius_nm(element: &str) -> f32 {
-        let angstrom = match element.trim().to_uppercase().as_str() {
-            "H" => 0.31,
-            "C" => 0.76,
-            "N" => 0.71,
-            "O" => 0.66,
-            "F" => 0.57,
-            "P" => 1.07,
-            "S" => 1.05,
-            "CL" => 1.02,
-            "BR" => 1.20,
-            "I" => 1.39,
-            _ => 0.77,
-        };
-        angstrom * ANGSTROM_TO_NM
+        match element.trim().to_uppercase().as_str() {
+            "H" => 0.031,
+            "C" => 0.076,
+            "N" => 0.071,
+            "O" => 0.066,
+            "F" => 0.057,
+            "P" => 0.107,
+            "S" => 0.105,
+            "CL" => 0.102,
+            "BR" => 0.120,
+            "I" => 0.139,
+            _ => 0.077,
+        }
     }
 
     fn infer_single_bonds_from_distance(atoms: &[Atom]) -> Vec<Bond> {
         let mut bonds = Vec::new();
 
         // Bond inference is computed in nm (same as GRO and viewer coordinates).
-        const EXTRA_TOLERANCE: f32 = 0.45 * ANGSTROM_TO_NM;
-        const MIN_DISTANCE_2: f32 = (0.4 * ANGSTROM_TO_NM) * (0.4 * ANGSTROM_TO_NM);
-        const MAX_COVALENT_RADIUS: f32 = 1.39 * ANGSTROM_TO_NM;
+        const EXTRA_TOLERANCE: f32 = 0.045;
+        const MIN_DISTANCE_2: f32 = 0.04 * 0.04;
+        const MAX_COVALENT_RADIUS: f32 = 0.139;
         const CELL_SIZE: f32 = MAX_COVALENT_RADIUS * 2.0 + EXTRA_TOLERANCE;
         const CELL_SIZE_INV: f32 = 1.0 / CELL_SIZE;
 

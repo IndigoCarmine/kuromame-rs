@@ -7,6 +7,8 @@ use moleucle_3dview_rs::{
 use std::collections::HashMap;
 use std::fmt::Write;
 
+const ANGSTROM_TO_NM: f32 = 0.1;
+
 // --- Mol2 Structures ---
 
 #[derive(Debug, Clone)]
@@ -188,7 +190,11 @@ impl To3dViewMolecule for Mol2File {
         for (i, record) in self.atoms().enumerate() {
             id_to_index.insert(record.atom_id, i);
             atoms.push(Atom {
-                position: Vec3::new(record.x, record.y, record.z),
+                position: Vec3::new(
+                    record.x * ANGSTROM_TO_NM,
+                    record.y * ANGSTROM_TO_NM,
+                    record.z * ANGSTROM_TO_NM,
+                ),
                 element: record
                     .atom_type
                     .split('.')

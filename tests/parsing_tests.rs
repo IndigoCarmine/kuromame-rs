@@ -1,4 +1,4 @@
-use kuromame_rs::parsing::{AtomRecord, GroFile, PdbFile, TopFile};
+use kuromame_rs::parsing::{AtomRecord, GroFile, Mol2File, PdbFile, TopFile};
 use kuromame_rs::view_rs::To3dViewMolecule;
 
 #[test]
@@ -19,6 +19,37 @@ fn test_pdb_parsing() {
     assert_eq!(mol.bonds.len(), 1);
     assert_eq!(mol.bonds[0].atom_a, 0);
     assert_eq!(mol.bonds[0].atom_b, 1);
+}
+
+#[test]
+fn test_pdb_to_molecule_uses_nm_internal_units() {
+    let pdb_content = "ATOM      1  C   LIG A   1      10.000   0.000   0.000  1.00  0.00           C  \n";
+
+    let pdb = PdbFile::load(pdb_content);
+    let mol = pdb.to_molecule();
+
+    assert_eq!(mol.atoms.len(), 1);
+    assert!((mol.atoms[0].position.x - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_mol2_to_molecule_uses_nm_internal_units() {
+    let mol2_content = concat!(
+        "@<TRIPOS>MOLECULE\n",
+        "TEST\n",
+        "1 0 0 0 0\n",
+        "SMALL\n",
+        "NO_CHARGES\n",
+        "\n",
+        "@<TRIPOS>ATOM\n",
+        "      1 C1         10.0000     0.0000     0.0000 C.3       1 LIG       0.0000\n",
+    );
+
+    let mol2 = Mol2File::load(mol2_content);
+    let mol = mol2.to_molecule();
+
+    assert_eq!(mol.atoms.len(), 1);
+    assert!((mol.atoms[0].position.x - 1.0).abs() < 1e-6);
 }
 
 #[test]
