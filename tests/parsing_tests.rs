@@ -1,4 +1,4 @@
-use kuromame_rs::parsing::{AtomRecord, GroFile, PdbFile};
+use kuromame_rs::parsing::{AtomRecord, GroFile, PdbFile, TopFile};
 use kuromame_rs::view_rs::To3dViewMolecule;
 
 #[test]
@@ -47,7 +47,9 @@ fn test_gro_resname_is_editable() {
     assert_eq!(mol.atoms.len(), 2);
     assert_eq!(mol.atoms[0].res_name.as_deref(), Some("LIG"));
     assert!((mol.atoms[1].position.x - 1.0).abs() < 1e-6);
-    assert_eq!(mol.bonds.len(), 0);
+    assert_eq!(mol.bonds.len(), 1);
+    assert_eq!(mol.bonds[0].atom_a, 0);
+    assert_eq!(mol.bonds[0].atom_b, 1);
 }
 
 #[test]
@@ -64,15 +66,65 @@ fn test_gro_bond_inference_uses_distance() {
     let gro = GroFile::load(gro_content);
     let mol = gro.to_molecule();
 
-    assert_eq!(mol.bonds.len(), 0);
+    assert_eq!(mol.bonds.len(), 1);
+    assert_eq!(mol.bonds[0].atom_a, 0);
+    assert_eq!(mol.bonds[0].atom_b, 1);
 }
 
 #[test]
-fn test_gro_roundtrip_is_exact_for_bar1416() {
-    let original = include_str!("../output.gro");
-    let gro = GroFile::load(original);
-    let time = std::time::Instant::now();
-    let a = gro.to_molecule(); // Check calculation speed. change and calclate bonds
+fn test_top_matches_gro_for_bar148() {
+    let top_content = include_str!("../Bar148.top");
+    let gro_content = include_str!("../Bar148.gro");
+
+    let top = TopFile::load(top_content);
+    let gro = GroFile::load(gro_content);
+
+    assert_eq!(top.atoms().count(), 119);
+    assert_eq!(gro.atoms().count(), 119);
+
+    let comparison = top.compare_with_gro(&gro);
+    assert!(comparison.matches(), "{:?}", comparison);
+
+    let relaxed = top.compare_with_gro_relaxed(&gro);
+    assert!(relaxed.matches(), "{:?}", relaxed);
+
+    let dumped = top.dump();
+    let reparsed = TopFile::load(&dumped);
+    assert_eq!(reparsed.atoms().count(), top.atoms().count());
+    assert_eq!(reparsed.bonds().count(), top.bonds().count());
+}
+
+#[test]
+fn test_top_resname_can_be_rewritten_to_aaa() {
+    let top_content = include_str!("../Bar148.top");
+
+    let mut top = TopFile::load(top_content);
+    let original_bond_count = top.bonds().count();
+    assert!(top.atoms().next().is_some());
+
+    for atom in top.atoms_mut() {
+        atom.set_res_name("AAA");
+    }
+
+    let dumped = top.dump();
+
+    //save file for debugging
+    std::fs::write("debug.top", &dumped).unwrap();
     
-    eprintln!("Bar1416 processing time: {:?}", time.elapsed());
+
+    let reparsed = TopFile::load(&dumped);
+
+    assert!(reparsed.atoms().all(|atom| atom.res == "AAA"));
+    assert_eq!(reparsed.atoms().count(), 119);
+    assert_eq!(reparsed.bonds().count(), original_bond_count);
+
+}
+
+#[test]
+fn test_top_roundtrip_is_exact_when_unmodified() {
+    let top_content = include_str!("../Bar148.top");
+    let top = TopFile::load(top_content);
+    let dumped = top.dump();
+
+    assert_eq!(dumped, top_content);
 }
