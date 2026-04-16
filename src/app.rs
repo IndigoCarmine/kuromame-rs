@@ -4,7 +4,7 @@ use moleucle_3dview_rs::{
     camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle, SelectedAtomRender,
 };
-use crate::parsing::{AtomRecord, GroFile, PdbFile};
+use crate::parsing::{AtomRecord, GroFile, PdbFile, TopFile};
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -75,6 +75,7 @@ pub struct KuromameApp {
     // Data state
     pub pdb_file: Option<PdbFile>,
     pub gro_file: Option<GroFile>,
+    pub top_file: Option<TopFile>,
     pub current_file_path: Option<PathBuf>,
 
     // Selection state
@@ -100,6 +101,7 @@ impl KuromameApp {
             render_state: cc.wgpu_render_state.clone(),
             pdb_file: None,
             gro_file: None,
+            top_file: None,
             current_file_path: None,
             with_hbond_chk: false,
             selected_atom_indices: Vec::new(),
@@ -159,10 +161,71 @@ impl KuromameApp {
             .add_filter("PDB Files", &["pdb", "ent", "cif"])
             .add_filter("MOL2 Files", &["mol2"])
             .add_filter("GRO Files", &["gro"])
+            .add_filter("TOP Files", &["top"])
             .pick_file()
         {
             self.load_file(path);
         }
+    }
+
+    pub fn open_top_and_gro_for_resname_sync(&mut self) {
+        let top_path = FileDialog::new()
+            .add_filter("TOP Files", &["top"])
+            .set_title("Select TOP file")
+            .pick_file();
+        let gro_path = FileDialog::new()
+            .add_filter("GRO Files", &["gro"])
+            .set_title("Select GRO file")
+            .pick_file();
+
+        match (top_path, gro_path) {
+            (Some(top), Some(gro)) => self.load_top_and_gro_for_resname_sync(top, gro),
+            _ => {
+                self.status_msg = "TOP/GRO pair selection cancelled".to_string();
+            }
+        }
+    }
+
+    fn load_top_and_gro_for_resname_sync(&mut self, top_path: PathBuf, gro_path: PathBuf) {
+        let top_content = match std::fs::read_to_string(&top_path) {
+            Ok(content) => content,
+            Err(_) => {
+                self.status_msg = "Failed to read TOP file".to_string();
+                return;
+            }
+        };
+
+        let mut top = TopFile::load(&top_content);
+        let gro = match GroFile::load_from_path(&gro_path) {
+            Ok(gro) => gro,
+            Err(_) => {
+                self.status_msg = "Failed to read GRO file".to_string();
+                return;
+            }
+        };
+
+        match top.sync_resnames_from_gro(&gro) {
+            Ok(updated) => {
+                let mol = gro.to_molecule_with_metadata(true);
+                self.set_molecule_and_frame(mol);
+                self.top_file = Some(top);
+                self.gro_file = Some(gro);
+                self.pdb_file = None;
+                self.current_file_path = Some(top_path);
+                self.status_msg = format!(
+                    "Loaded TOP+GRO. Check1/Check2 passed; synced {} TOP resnames from GRO",
+                    updated
+                );
+            }
+            Err(err) => {
+                self.status_msg = format!("TOP/GRO consistency check failed: {}", err);
+            }
+        }
+
+        if let Some(renderer) = &mut self.viewer.additional_render {
+            *renderer = Box::new(SelectedAtomRender::new());
+        }
+        self.selected_atom_indices.clear();
     }
 
     pub fn load_file(&mut self, path: PathBuf) {
@@ -223,6 +286,20 @@ impl KuromameApp {
                     }
                 }
             }
+            "top" => {
+                match std::fs::read_to_string(&path).ok().map(|content| TopFile::load(&content)) {
+                    Some(top) => {
+                        self.top_file = Some(top);
+                        self.gro_file = None;
+                        self.pdb_file = None;
+                        self.current_file_path = Some(path);
+                        self.status_msg = "Loaded TOP".to_string();
+                    }
+                    None => {
+                        self.status_msg = "Failed to load TOP file".to_string();
+                    }
+                }
+            }
             _ => {
                 self.status_msg = "Unsupported file type".to_string();
             }
@@ -275,14 +352,37 @@ impl KuromameApp {
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped_path = ctx.input(|i| {
+        let dropped_paths: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .find_map(|file| file.path.clone())
+                .filter_map(|file| file.path.clone())
+                .collect()
         });
 
-        if let Some(path) = dropped_path {
+        if dropped_paths.is_empty() {
+            return;
+        }
+
+        let mut top_path: Option<PathBuf> = None;
+        let mut gro_path: Option<PathBuf> = None;
+
+        for path in &dropped_paths {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                match ext.to_ascii_lowercase().as_str() {
+                    "top" => top_path = Some(path.clone()),
+                    "gro" => gro_path = Some(path.clone()),
+                    _ => {}
+                }
+            }
+        }
+
+        if let (Some(top), Some(gro)) = (top_path, gro_path) {
+            self.load_top_and_gro_for_resname_sync(top, gro);
+            return;
+        }
+
+        if let Some(path) = dropped_paths.into_iter().next() {
             self.load_file(path);
         }
     }
@@ -311,6 +411,9 @@ impl KuromameApp {
                 ui.heading("Controls");
                 if ui.button("Open Molecule File (PDB/MOL2/GRO)").clicked() {
                     self.open_file();
+                }
+                if ui.button("Open TOP + GRO (sync TOP resname from GRO)").clicked() {
+                    self.open_top_and_gro_for_resname_sync();
                 }
 
                 if let Some(path) = &self.current_file_path {
@@ -544,6 +647,16 @@ impl KuromameApp {
             }
         }
 
+        if let Some(top) = &mut self.top_file {
+            // Keep TOP in sync with current selection indices when TOP+GRO are loaded together.
+            let mut atoms_vec: Vec<_> = top.atoms_mut().collect();
+            for &idx in &indices_to_update {
+                if let Some(atom) = atoms_vec.get_mut(idx) {
+                    atom.set_res_name(&new_name);
+                }
+            }
+        }
+
         // Update viewer atoms in-place so we keep the original molecule graph
         // (bond topology from loader/inference) and avoid disappearing geometry.
         if let Some(mol) = &mut self.viewer.molecule {
@@ -562,40 +675,31 @@ impl KuromameApp {
     }
 
     fn export_structure(&mut self) {
-        if self.gro_file.is_none() && self.pdb_file.is_none() {
+        if self.top_file.is_none() && self.gro_file.is_none() && self.pdb_file.is_none() {
             if let Some(mol) = &self.viewer.molecule {
                 self.pdb_file = Some(PdbFile::from_molecule(mol));
             }
         }
 
-        if let Some(gro) = &self.gro_file {
-            if let Some(path) = FileDialog::new()
-                .set_file_name("edited.gro")
-                .add_filter("GRO", &["gro"])
-                .save_file()
-            {
+        if let Some(path) = FileDialog::new().save_file() {
+            let saved = if let Some(top) = &self.top_file {
+                let content = top.dump();
+                std::fs::write(&path, content).is_ok()
+            } else if let Some(gro) = &self.gro_file {
                 let content = gro.dump();
-                if std::fs::write(path, content).is_ok() {
-                    self.status_msg = "Exported GRO".to_string();
-                } else {
-                    self.status_msg = "Failed to export GRO".to_string();
-                }
-            }
-        } else if let Some(pdb) = &mut self.pdb_file {
-            if let Some(path) = FileDialog::new()
-                .set_file_name("edited.pdb")
-                .add_filter("PDB", &["pdb"])
-                .save_file()
-            {
+                std::fs::write(&path, content).is_ok()
+            } else if let Some(pdb) = &mut self.pdb_file {
                 let content = pdb.dump();
-                if std::fs::write(path, content).is_ok() {
-                    self.status_msg = "Exported PDB".to_string();
-                } else {
-                    self.status_msg = "Failed to export PDB".to_string();
-                }
+                std::fs::write(&path, content).is_ok()
+            } else {
+                false
+            };
+
+            if saved {
+                self.status_msg = "Exported structure".to_string();
+            } else {
+                self.status_msg = "Failed to export structure".to_string();
             }
-        } else {
-            self.status_msg = "No molecule loaded to export".to_string();
         }
     }
 }

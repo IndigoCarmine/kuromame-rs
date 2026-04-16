@@ -1,6 +1,10 @@
 use crate::parsing::GroFile;
 use std::collections::BTreeSet;
 
+// Gromacs TOP bonded length parameters are represented in nanometers.
+#[allow(dead_code)]
+pub const GROMACS_LENGTH_UNIT: &str = "nm";
+
 #[derive(Debug, Clone)]
 pub struct TopAtomRecord {
     pub nr: usize,
@@ -67,6 +71,7 @@ pub struct TopBondRecord {
     pub ai: usize,
     pub aj: usize,
     pub funct: i32,
+    // Bond length in Gromacs TOP is nm when present.
     pub r: Option<f32>,
     pub k: Option<f32>,
     pub comment: Option<String>,

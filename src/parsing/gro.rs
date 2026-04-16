@@ -6,8 +6,13 @@ use moleucle_3dview_rs::{
 };
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
 use std::fmt::Write;
+use std::io::{self, BufRead, BufReader};
+
+// Gromacs GRO coordinates and box vectors are represented in nanometers.
+#[allow(dead_code)]
+pub const GROMACS_LENGTH_UNIT: &str = "nm";
+pub const ANGSTROM_TO_NM: f32 = 0.1;
 
 // --- GRO Structures ---
 
@@ -47,6 +52,7 @@ pub struct GroAtomRecord {
     pub res_name: GroFixed5,
     pub atom_name: GroFixed5,
     pub atom_id: usize,
+    // GRO coordinate unit is nanometer (nm).
     pub x: f32,
     pub y: f32,
     pub z: f32,
@@ -200,8 +206,8 @@ impl GroFile {
         }
     }
 
-    fn covalent_radius_angstrom(element: &str) -> f32 {
-        match element.trim().to_uppercase().as_str() {
+    fn covalent_radius_nm(element: &str) -> f32 {
+        let angstrom = match element.trim().to_uppercase().as_str() {
             "H" => 0.31,
             "C" => 0.76,
             "N" => 0.71,
@@ -213,15 +219,17 @@ impl GroFile {
             "BR" => 1.20,
             "I" => 1.39,
             _ => 0.77,
-        }
+        };
+        angstrom * ANGSTROM_TO_NM
     }
 
     fn infer_single_bonds_from_distance(atoms: &[Atom]) -> Vec<Bond> {
         let mut bonds = Vec::new();
 
-        const EXTRA_TOLERANCE: f32 = 0.45;
-        const MIN_DISTANCE_2: f32 = 0.4 * 0.4;
-        const MAX_COVALENT_RADIUS: f32 = 1.39;
+        // Bond inference is computed in nm (same as GRO and viewer coordinates).
+        const EXTRA_TOLERANCE: f32 = 0.45 * ANGSTROM_TO_NM;
+        const MIN_DISTANCE_2: f32 = (0.4 * ANGSTROM_TO_NM) * (0.4 * ANGSTROM_TO_NM);
+        const MAX_COVALENT_RADIUS: f32 = 1.39 * ANGSTROM_TO_NM;
         const CELL_SIZE: f32 = MAX_COVALENT_RADIUS * 2.0 + EXTRA_TOLERANCE;
         const CELL_SIZE_INV: f32 = 1.0 / CELL_SIZE;
 
@@ -234,7 +242,7 @@ impl GroFile {
                 (atom.position.z * CELL_SIZE_INV).floor() as i32,
             );
 
-            let ri = Self::covalent_radius_angstrom(&atom.element);
+            let ri = Self::covalent_radius_nm(&atom.element);
 
             for dx in -1..=1 {
                 for dy in -1..=1 {
@@ -250,7 +258,7 @@ impl GroFile {
                                     continue;
                                 }
 
-                                let rj = Self::covalent_radius_angstrom(&atoms[j].element);
+                                let rj = Self::covalent_radius_nm(&atoms[j].element);
                                 let max_bond_distance = ri + rj + EXTRA_TOLERANCE;
                                 if distance <= max_bond_distance * max_bond_distance {
                                     bonds.push(Bond {
@@ -274,16 +282,17 @@ impl GroFile {
 
 impl GroFile {
     pub fn to_molecule_with_metadata(&self, include_metadata: bool) -> Molecule {
-        const GRO_TO_VIEW_SCALE: f32 = 10.0;
+        // Viewer molecule coordinates are interpreted in nm.
+        // GRO is also nm, so pass through coordinates without scaling.
 
         let atoms = self
             .atoms()
             .enumerate()
             .map(|(idx, atom)| Atom {
                 position: Vec3::new(
-                    atom.x * GRO_TO_VIEW_SCALE,
-                    atom.y * GRO_TO_VIEW_SCALE,
-                    atom.z * GRO_TO_VIEW_SCALE,
+                    atom.x,
+                    atom.y,
+                    atom.z,
                 ),
                 element: Self::infer_element(atom.atom_name.trimmed()),
                 id: idx,

@@ -46,7 +46,7 @@ fn test_gro_resname_is_editable() {
     let mol = gro.to_molecule();
     assert_eq!(mol.atoms.len(), 2);
     assert_eq!(mol.atoms[0].res_name.as_deref(), Some("LIG"));
-    assert!((mol.atoms[1].position.x - 1.0).abs() < 1e-6);
+    assert!((mol.atoms[1].position.x - 0.1).abs() < 1e-6);
     assert_eq!(mol.bonds.len(), 1);
     assert_eq!(mol.bonds[0].atom_a, 0);
     assert_eq!(mol.bonds[0].atom_b, 1);
@@ -127,4 +127,32 @@ fn test_top_roundtrip_is_exact_when_unmodified() {
     let dumped = top.dump();
 
     assert_eq!(dumped, top_content);
+}
+
+#[test]
+fn test_top_resname_sync_from_gro_passes_two_checks_and_updates() {
+    let top_content = include_str!("../Bar148.top");
+    let mut top = TopFile::load(top_content);
+    let mut gro = GroFile::load(include_str!("../Bar148.gro"));
+
+    for atom in gro.atoms_mut() {
+        atom.set_res_name("AAA");
+    }
+
+    let updated = top.sync_resnames_from_gro(&gro).expect("sync should pass");
+
+    assert_eq!(updated, top.atoms().count());
+    assert!(top.atoms().all(|atom| atom.res == "AAA"));
+}
+
+#[test]
+fn test_top_resname_sync_from_gro_fails_when_atom_order_mismatch() {
+    let top_content = include_str!("../Bar148.top");
+    let mut top = TopFile::load(top_content);
+    let gro_text = include_str!("../Bar148.gro");
+    let bad_gro_text = gro_text.replacen("C1", "ZZ", 1);
+    let gro = GroFile::load(&bad_gro_text);
+
+    let result = top.sync_resnames_from_gro(&gro);
+    assert!(result.is_err());
 }
