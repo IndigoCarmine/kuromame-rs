@@ -1,6 +1,6 @@
 [package]
 name = "kuromame-rs"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -11,3 +11,4 @@ egui-wgpu = "0.33.3"
 rfd = "0.15"
 anyhow = "1.0"
 lin_alg = "1.3.14"
+material-icons = "0.3.0"

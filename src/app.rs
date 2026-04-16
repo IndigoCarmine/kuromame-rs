@@ -17,6 +17,8 @@ struct LoadedDataState {
     gro_file: Option<GroFile>,
     top_file: Option<TopFile>,
     current_file_path: Option<PathBuf>,
+    loaded_summary: String,
+    is_modified: bool,
 }
 
 impl LoadedDataState {
@@ -36,6 +38,7 @@ struct UiState {
     status_msg: String,
     show_edit_dialog: bool,
     new_res_name: String,
+    hovered_atom_info: String,
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
@@ -108,7 +111,60 @@ pub struct KuromameApp {
 }
 
 impl KuromameApp {
+    fn apply_visual_theme(ctx: &egui::Context) {
+        let primary = egui::Color32::from_rgb(19, 161, 152);
+        let secondary = egui::Color32::from_rgb(241, 98, 69);
+
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.spacing.button_padding = egui::vec2(12.0, 8.0);
+
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(24.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(18.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(18.0, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            egui::FontId::new(16.0, egui::FontFamily::Monospace),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::new(15.0, egui::FontFamily::Proportional),
+        );
+
+        style.visuals.widgets.active.bg_fill = primary;
+        style.visuals.widgets.hovered.bg_fill = secondary;
+        style.visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+        style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+        style.visuals.selection.bg_fill = primary;
+        style.visuals.hyperlink_color = secondary;
+
+        ctx.set_style(style);
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "material_icons".to_string(),
+            egui::FontData::from_static(material_icons::FONT).into(),
+        );
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            family.push("material_icons".to_string());
+        }
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            family.push("material_icons".to_string());
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        Self::apply_visual_theme(&cc.egui_ctx);
+
         let mut viewer = MoleculeViewer::new();
         viewer.set_color_fn(color_by_res_name);
         viewer.additional_render = Some(Box::new(SelectedAtomRender::new()));
@@ -123,6 +179,8 @@ impl KuromameApp {
                 gro_file: None,
                 top_file: None,
                 current_file_path: None,
+                loaded_summary: "No file loaded".to_string(),
+                is_modified: false,
             },
             selection: SelectionState {
                 with_hbond_chk: false,
@@ -132,6 +190,7 @@ impl KuromameApp {
                 status_msg: "Ready".to_string(),
                 show_edit_dialog: false,
                 new_res_name: String::new(),
+                hovered_atom_info: "Hover an atom for details".to_string(),
             },
         }
     }
@@ -153,17 +212,192 @@ impl KuromameApp {
         self.ui.status_msg = msg.into();
     }
 
+    fn set_loaded_summary(&mut self, summary: impl Into<String>) {
+        self.data.loaded_summary = summary.into();
+    }
+
+    fn mark_modified(&mut self) {
+        self.data.is_modified = true;
+    }
+
+    fn mark_clean(&mut self) {
+        self.data.is_modified = false;
+    }
+
+    fn open_resname_dialog(&mut self) {
+        self.ui.show_edit_dialog = true;
+        self.ui.new_res_name = "ALA".to_string();
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection.selected_atom_indices.clear();
+        self.sync_selection_to_renderer();
+    }
+
+    fn toggle_hbond_selection(&mut self) {
+        self.selection.with_hbond_chk = !self.selection.with_hbond_chk;
+    }
+
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let shortcuts = ctx.input(|i| {
+            let ctrl = i.modifiers.ctrl;
+            let shift = i.modifiers.shift;
+            (
+                ctrl && !shift && i.key_pressed(egui::Key::O),
+                ctrl && shift && i.key_pressed(egui::Key::O),
+                ctrl && !shift && i.key_pressed(egui::Key::R),
+                ctrl && !shift && i.key_pressed(egui::Key::S),
+                ctrl && !shift && i.key_pressed(egui::Key::H),
+                ctrl && !shift && i.key_pressed(egui::Key::B),
+                ctrl && shift && i.key_pressed(egui::Key::A),
+            )
+        });
+
+        if shortcuts.0 {
+            self.open_file();
+        }
+        if shortcuts.1 {
+            self.open_top_and_gro_for_resname_sync();
+        }
+        if shortcuts.2 {
+            self.open_resname_dialog();
+        }
+        if shortcuts.3 {
+            self.export_structure();
+        }
+        if shortcuts.4 {
+            self.toggle_hbond_selection();
+        }
+        if shortcuts.5 && self.selection.selected_atom_indices.len() == 2 {
+            self.select_shortest_path(
+                self.selection.selected_atom_indices[0],
+                self.selection.selected_atom_indices[1],
+            );
+        }
+        if shortcuts.6 {
+            self.clear_selection();
+        }
+    }
+
+    fn hovered_atom_info(&self, atom_index: usize) -> Option<String> {
+        let mut atom_name: Option<String> = None;
+        let mut res_name: Option<String> = None;
+
+        if let Some(mol) = &self.viewer.molecule {
+            if let Some(atom) = mol.atoms.get(atom_index) {
+                atom_name = atom
+                    .name
+                    .as_ref()
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
+
+                if atom_name.is_none() && !atom.element.trim().is_empty() {
+                    atom_name = Some(atom.element.trim().to_string());
+                }
+
+                res_name = atom
+                    .res_name
+                    .as_ref()
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
+            }
+        }
+
+        if let Some(pdb) = &self.data.pdb_file {
+            if let Some(atom) = pdb.atoms().nth(atom_index) {
+                if atom_name.is_none() && !atom.name.trim().is_empty() {
+                    atom_name = Some(atom.name.trim().to_string());
+                }
+                if res_name.is_none() && !atom.res_name.trim().is_empty() {
+                    res_name = Some(atom.res_name.trim().to_string());
+                }
+            }
+        }
+
+        if let Some(gro) = &self.data.gro_file {
+            if let Some(atom) = gro.atoms().nth(atom_index) {
+                if atom_name.is_none() {
+                    let name = atom.atom_name.trimmed();
+                    if !name.is_empty() {
+                        atom_name = Some(name.to_string());
+                    }
+                }
+                if res_name.is_none() {
+                    let name = atom.res_name.trimmed();
+                    if !name.is_empty() {
+                        res_name = Some(name.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(top) = &self.data.top_file {
+            if let Some(atom) = top.atoms().nth(atom_index) {
+                if atom_name.is_none() && !atom.atom.trim().is_empty() {
+                    atom_name = Some(atom.atom.trim().to_string());
+                }
+                if res_name.is_none() && !atom.res.trim().is_empty() {
+                    res_name = Some(atom.res.trim().to_string());
+                }
+            }
+        }
+
+        if atom_name.is_none() && res_name.is_none() {
+            return None;
+        }
+
+        Some(format!(
+            "Index={} AtomName={} Resname={}",
+            atom_index,
+            atom_name.unwrap_or_else(|| "-".to_string()),
+            res_name.unwrap_or_else(|| "-".to_string())
+        ))
+    }
+
     fn sync_viewer_resnames_from_loaded_files(&mut self) {
-        let resnames: Vec<String> = if let Some(top) = &self.data.top_file {
-            top.atoms().map(|atom| atom.res.trim().to_string()).collect()
-        } else if let Some(gro) = &self.data.gro_file {
+        let viewer_atom_count = self
+            .viewer
+            .molecule
+            .as_ref()
+            .map(|mol| mol.atoms.len())
+            .unwrap_or(0);
+
+        if viewer_atom_count == 0 {
+            return;
+        }
+
+        let top_resnames = self.data.top_file.as_ref().map(|top| {
+            top.atoms()
+                .map(|atom| atom.res.trim().to_string())
+                .collect::<Vec<_>>()
+        });
+
+        let gro_resnames = self.data.gro_file.as_ref().map(|gro| {
             gro.atoms()
                 .map(|atom| atom.res_name.trimmed().to_string())
-                .collect()
-        } else if let Some(pdb) = &self.data.pdb_file {
-            pdb.atoms().map(|atom| atom.res_name.trim().to_string()).collect()
+                .collect::<Vec<_>>()
+        });
+
+        let pdb_resnames = self.data.pdb_file.as_ref().map(|pdb| {
+            pdb.atoms()
+                .map(|atom| atom.res_name.trim().to_string())
+                .collect::<Vec<_>>()
+        });
+
+        let resnames: Vec<String> = if let Some(names) = top_resnames {
+            if names.len() == viewer_atom_count {
+                names
+            } else {
+                gro_resnames
+                    .filter(|names| names.len() == viewer_atom_count)
+                    .or_else(|| pdb_resnames.filter(|names| names.len() == viewer_atom_count))
+                    .unwrap_or_default()
+            }
         } else {
-            Vec::new()
+            gro_resnames
+                .filter(|names| names.len() == viewer_atom_count)
+                .or_else(|| pdb_resnames.filter(|names| names.len() == viewer_atom_count))
+                .unwrap_or_default()
         };
 
         if resnames.is_empty() {
@@ -252,6 +486,8 @@ impl KuromameApp {
     }
 
     fn load_top_and_gro_for_resname_sync(&mut self, top_path: PathBuf, gro_path: PathBuf) {
+        let top_name = top_path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        let gro_name = gro_path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
         let top_content = match std::fs::read_to_string(&top_path) {
             Ok(content) => content,
             Err(_) => {
@@ -277,6 +513,8 @@ impl KuromameApp {
                 self.data.top_file = Some(top);
                 self.data.gro_file = Some(gro);
                 self.data.current_file_path = Some(top_path);
+                self.set_loaded_summary(format!("TOP+GRO: {} + {}", top_name, gro_name));
+                self.mark_clean();
                 self.set_status(format!(
                     "Loaded TOP+GRO. Check1/Check2 passed; synced {} TOP resnames from GRO",
                     updated
@@ -309,6 +547,7 @@ impl KuromameApp {
     }
 
     fn load_pdb_file(&mut self, path: PathBuf) {
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let pdb = PdbFile::load(&content);
@@ -317,6 +556,8 @@ impl KuromameApp {
                 self.data.clear_structures();
                 self.data.pdb_file = Some(pdb);
                 self.data.current_file_path = Some(path);
+                self.set_loaded_summary(format!("PDB: {}", file_name));
+                self.mark_clean();
                 self.set_status("Loaded PDB");
             }
             Err(_) => self.set_status("Failed to load PDB file"),
@@ -324,6 +565,7 @@ impl KuromameApp {
     }
 
     fn load_mol2_file(&mut self, path: PathBuf) {
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let mol2 = Mol2File::load(&content);
@@ -333,6 +575,8 @@ impl KuromameApp {
                 self.data.clear_structures();
                 self.data.pdb_file = Some(pdb_from_mol2);
                 self.data.current_file_path = Some(path);
+                self.set_loaded_summary(format!("MOL2: {}", file_name));
+                self.mark_clean();
                 self.set_status("Loaded MOL2");
             }
             Err(_) => self.set_status("Failed to load MOL2 file"),
@@ -340,6 +584,7 @@ impl KuromameApp {
     }
 
     fn load_gro_file(&mut self, path: PathBuf) {
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
         const LARGE_GRO_THRESHOLD_BYTES: u64 = 20 * 1024 * 1024;
         let large_gro = std::fs::metadata(&path)
             .map(|m| m.len() >= LARGE_GRO_THRESHOLD_BYTES)
@@ -352,6 +597,8 @@ impl KuromameApp {
                 self.data.clear_structures();
                 self.data.gro_file = if large_gro { None } else { Some(gro) };
                 self.data.current_file_path = Some(path);
+                self.set_loaded_summary(format!("GRO: {}", file_name));
+                self.mark_clean();
                 if large_gro {
                     self.set_status(
                         "Loaded GRO (compact mode: reduced memory, GRO edit/export disabled)",
@@ -365,6 +612,7 @@ impl KuromameApp {
     }
 
     fn load_top_file(&mut self, path: PathBuf) {
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
         match std::fs::read_to_string(&path).ok().map(|content| TopFile::load(&content)) {
             Some(top) => {
                 let can_sync_with_loaded_gro = self
@@ -379,6 +627,9 @@ impl KuromameApp {
 
                 self.data.pdb_file = None;
                 self.data.top_file = Some(top);
+                self.data.current_file_path = Some(path);
+                self.set_loaded_summary(format!("TOP: {}", file_name));
+                self.mark_clean();
 
                 if can_sync_with_loaded_gro {
                     let top_resnames: Vec<String> = self
@@ -399,6 +650,7 @@ impl KuromameApp {
                         }
                     }
                     self.sync_viewer_resnames_from_loaded_files();
+                    self.set_loaded_summary(format!("TOP+GRO: {}", file_name));
                     self.set_status("Loaded TOP and synchronized residue names to current GRO/view");
                 } else if self.data.gro_file.is_some() {
                     self.set_status(
@@ -407,8 +659,6 @@ impl KuromameApp {
                 } else {
                     self.set_status("Loaded TOP (view unchanged: load GRO to visualize residue changes)");
                 }
-
-                self.data.current_file_path = Some(path);
             }
             None => self.set_status("Failed to load TOP file"),
         }
@@ -492,7 +742,6 @@ impl KuromameApp {
 
     pub fn render_ui(&mut self, ctx: &egui::Context) {
         app_ui::render_edit_dialog(self, ctx);
-        app_ui::render_side_panel(self, ctx);
     }
 
     fn select_shortest_path(&mut self, start: usize, end: usize) {
@@ -647,6 +896,7 @@ impl KuromameApp {
 
         // Keep renderer metadata aligned with currently loaded structural data.
         self.sync_viewer_resnames_from_loaded_files();
+        self.mark_modified();
 
         // Clear selection
         self.selection.selected_atom_indices.clear();
@@ -676,6 +926,7 @@ impl KuromameApp {
             };
 
             if saved {
+                self.mark_clean();
                 self.set_status("Exported structure");
             } else {
                 self.set_status("Failed to export structure");
@@ -683,8 +934,11 @@ impl KuromameApp {
         }
     }
 
-    fn pick_atom_index(&self, response: &egui::Response) -> Option<usize> {
-        let pointer = response.interact_pointer_pos()?;
+    fn pick_atom_index(&self, ctx: &egui::Context, response: &egui::Response) -> Option<usize> {
+        let pointer = ctx.input(|i| i.pointer.hover_pos())?;
+        if !response.rect.contains(pointer) {
+            return None;
+        }
         let local = pointer - response.rect.min;
         let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
             local.x,
@@ -704,9 +958,11 @@ impl KuromameApp {
 
 impl eframe::App for KuromameApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_keyboard_shortcuts(ctx);
         self.handle_dropped_files(ctx);
 
-        app_ui::render_top_help_panel(self, ctx);
+        app_ui::render_top_info_panel(self, ctx);
+        app_ui::render_edit_dialog(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(render_state) = &self.render_state else {
@@ -758,7 +1014,7 @@ impl eframe::App for KuromameApp {
             );
 
             // Track hovered atom residue name for tooltip rendering.
-            let mut hovered_resname: Option<String> = None;
+            let mut hovered_atom_info: Option<String> = None;
 
             // Handle mouse wheel for dolly
             if response.hovered() {
@@ -794,24 +1050,14 @@ impl eframe::App for KuromameApp {
 
             // Handle hover picking for residue name tooltip.
             if response.hovered() {
-                if let Some(i) = self.pick_atom_index(&response) {
-                    if let Some(mol) = &self.viewer.molecule {
-                        if let Some(atom) = mol.atoms.get(i) {
-                            let resname = atom
-                                .res_name
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or("-");
-                            hovered_resname = Some(format!("resname: {}", resname));
-                        }
-                    }
+                if let Some(i) = self.pick_atom_index(ctx, &response) {
+                    hovered_atom_info = self.hovered_atom_info(i);
                 }
             }
 
             // Handle mouse click for atom picking
             if response.clicked_by(PointerButton::Primary) {
-                if let Some(i) = self.pick_atom_index(&response) {
+                if let Some(i) = self.pick_atom_index(ctx, &response) {
                     let selected_now = self.toggle_selected_atom(i);
                     if self.selection.with_hbond_chk {
                         if selected_now {
@@ -824,13 +1070,15 @@ impl eframe::App for KuromameApp {
                 }
             }
 
-            if let Some(label) = hovered_resname {
-                response.clone().on_hover_text(label);
+            if let Some(label) = hovered_atom_info {
+                response.clone().on_hover_text(label.clone());
+                self.ui.hovered_atom_info = label;
+            } else {
+                self.ui.hovered_atom_info = "Hover an atom for details".to_string();
             }
         });
 
-        // Render the UI panel
-        self.render_ui(ctx);
+        app_ui::render_bottom_status_bar(self, ctx);
 
         // Request continuous repaint
         ctx.request_repaint();

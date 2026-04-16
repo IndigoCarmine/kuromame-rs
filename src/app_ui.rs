@@ -1,36 +1,236 @@
 use eframe::egui;
+use material_icons::{Icon as MaterialIcon, icon_to_char};
 use moleucle_3dview_rs::RenderStyle;
 
-use super::{AtomRecord, KuromameApp};
+use super::KuromameApp;
+
+fn mi(icon: MaterialIcon) -> String {
+    icon_to_char(icon).to_string()
+}
 
 pub fn render_edit_dialog(app: &mut KuromameApp, ctx: &egui::Context) {
     let mut open_edit_dialog = app.ui.show_edit_dialog;
 
     if open_edit_dialog {
+        let mut close_requested = false;
         egui::Window::new("Edit Residue Name")
             .open(&mut open_edit_dialog)
+            .collapsible(false)
+            .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Enter new residue name (3 letters):");
-                ui.text_edit_singleline(&mut app.ui.new_res_name);
-                if ui.button("Apply").clicked() {
+                let edit_response = ui.text_edit_singleline(&mut app.ui.new_res_name);
+                if !edit_response.has_focus() {
+                    ui.memory_mut(|mem| mem.request_focus(edit_response.id));
+                }
+
+                let apply_by_enter =
+                    edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let apply_by_button = ui.button("Apply").clicked();
+
+                if apply_by_enter || apply_by_button {
                     app.apply_res_name_change();
                     app.ui.show_edit_dialog = false;
+                    close_requested = true;
                 }
             });
+        if close_requested {
+            open_edit_dialog = false;
+        }
         app.ui.show_edit_dialog = open_edit_dialog;
     }
 }
 
-pub fn render_top_help_panel(app: &mut KuromameApp, ctx: &egui::Context) {
+pub fn render_top_info_panel(app: &mut KuromameApp, ctx: &egui::Context) {
+    let font_size = 17.0;
+    let font_family = egui::FontFamily::Proportional;
+    let primary = egui::Color32::from_rgb(19, 161, 152);
+    let secondary = egui::Color32::from_rgb(241, 98, 69);
+
     egui::TopBottomPanel::top("help")
         .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::WHITE)
+                .inner_margin(egui::Margin::symmetric(12, 10)),
+        )
         .show(ctx, |ui| {
-            ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
-            ui.label("Drop a PDB/MOL2/GRO file anywhere in the window to load it");
-            ui.label(format!(
-                "Selected atoms: {:?}",
-                app.selection.selected_atom_indices
-            ));
+            egui::Frame::new()
+                .fill(egui::Color32::WHITE)
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("Loaded").strong());
+                        ui.monospace(&app.data.loaded_summary);
+
+                        if app.data.is_modified {
+                            ui.colored_label(egui::Color32::YELLOW, "modified");
+                        } else {
+                            ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "saved");
+                        }
+
+                        ui.separator();
+                        ui.small("Ctrl+O open");
+                        ui.small("Ctrl+Shift+O TOP+GRO");
+                        ui.small("Ctrl+R edit");
+                        ui.small("Ctrl+S export");
+                        ui.small("Ctrl+B path");
+                        ui.small("Ctrl+H hbond");
+                        ui.small("Ctrl+Shift+A clear");
+                    });
+                });
+
+            ui.add_space(4.0);
+
+            // Row 1: Main operations
+            ui.horizontal_wrapped(|ui| {
+                let btn_size = egui::vec2(220.0, 38.0);
+
+                if ui
+                    .add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} Open Molecule",
+                                mi(MaterialIcon::FolderOpen)
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .size(font_size - 2.0)
+                            .family(font_family.clone()),
+                        )
+                        .fill(primary),
+                    )
+                    .on_hover_text("Ctrl+O")
+                    .clicked()
+                {
+                    app.open_file();
+                }
+
+                if ui
+                    .add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} Open TOP+GRO",
+                                mi(MaterialIcon::FileOpen)
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .size(font_size - 2.0)
+                            .family(font_family.clone()),
+                        )
+                        .fill(secondary),
+                    )
+                    .on_hover_text("Ctrl+Shift+O")
+                    .clicked()
+                {
+                    app.open_top_and_gro_for_resname_sync();
+                }
+
+                if ui
+                    .add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Export", mi(MaterialIcon::Save)))
+                                .color(egui::Color32::WHITE)
+                                .size(font_size - 2.0)
+                                .family(font_family.clone()),
+                        )
+                        .fill(egui::Color32::from_rgb(84, 98, 125)),
+                    )
+                    .on_hover_text("Ctrl+S")
+                    .clicked()
+                {
+                    app.export_structure();
+                }
+            });
+
+            ui.add_space(2.0);
+
+            // Row 2: Selection operations
+            ui.horizontal_wrapped(|ui| {
+                let btn_size = egui::vec2(220.0, 38.0);
+
+                let can_select_path = app.selection.selected_atom_indices.len() == 2;
+                if ui
+                    .add_enabled_ui(can_select_path, |ui| {
+                        ui.add_sized(
+                            btn_size,
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Select Between",
+                                    mi(MaterialIcon::AltRoute)
+                                ))
+                                .color(egui::Color32::WHITE)
+                                .size(font_size - 2.0)
+                                .family(font_family.clone()),
+                            )
+                            .fill(primary),
+                        )
+                    })
+                    .inner
+                    .on_hover_text("Ctrl+B (need 2 atoms selected)")
+                    .clicked()
+                {
+                    app.select_shortest_path(
+                        app.selection.selected_atom_indices[0],
+                        app.selection.selected_atom_indices[1],
+                    );
+                }
+
+                if ui
+                    .add_enabled_ui(!app.selection.selected_atom_indices.is_empty(), |ui| {
+                        ui.add_sized(
+                            btn_size,
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Change Resname",
+                                    mi(MaterialIcon::Edit)
+                                ))
+                                .color(egui::Color32::WHITE)
+                                .size(font_size - 2.0)
+                                .family(font_family.clone()),
+                            )
+                            .fill(secondary),
+                        )
+                    })
+                    .inner
+                    .on_hover_text("Ctrl+R")
+                    .clicked()
+                {
+                    app.open_resname_dialog();
+                }
+
+                if ui
+                    .add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} Clear Selection",
+                                mi(MaterialIcon::ClearAll)
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .size(font_size - 2.0)
+                            .family(font_family.clone()),
+                        )
+                        .fill(egui::Color32::from_rgb(84, 98, 125)),
+                    )
+                    .on_hover_text("Ctrl+Shift+A")
+                    .clicked()
+                {
+                    app.clear_selection();
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Selected: {}",
+                    app.selection.selected_atom_indices.len()
+                ))
+                .strong(),
+            );
 
             ui.horizontal(|ui| {
                 ui.label("Render Style:");
@@ -42,109 +242,24 @@ pub fn render_top_help_panel(app: &mut KuromameApp, ctx: &egui::Context) {
         });
 }
 
-pub fn render_side_panel(app: &mut KuromameApp, ctx: &egui::Context) {
-    egui::SidePanel::right("control_panel")
-        .resizable(true)
-        .default_width(300.0)
+pub fn render_bottom_status_bar(app: &mut KuromameApp, ctx: &egui::Context) {
+    egui::TopBottomPanel::bottom("status_bar")
+        .resizable(false)
+        .exact_height(48.0)
+        .frame(
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(20, 27, 36))
+                .inner_margin(egui::Margin::symmetric(12, 8)),
+        )
         .show(ctx, |ui| {
-            ui.heading("Controls");
-            if ui.button("Open Molecule File (PDB/MOL2/GRO)").clicked() {
-                app.open_file();
-            }
-            if ui.button("Open TOP + GRO (sync TOP resname from GRO)").clicked() {
-                app.open_top_and_gro_for_resname_sync();
-            }
-
-            if let Some(path) = &app.data.current_file_path {
-                ui.label(format!("Loaded: {:?}", path.file_name().unwrap()));
-            } else {
-                ui.label("No file loaded");
-            }
-
-            ui.checkbox(
-                &mut app.selection.with_hbond_chk,
-                "Select with connected hydrogens",
-            );
-
-            ui.separator();
-            ui.label("Selected atoms:");
-
-            let selected_indices = app.selection.selected_atom_indices.clone();
-
-            ui.label(format!("Count: {}", selected_indices.len()));
-
-            egui::ScrollArea::vertical()
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    if let Some(pdb) = &app.data.pdb_file {
-                        let atoms_vec: Vec<&AtomRecord> = pdb.atoms().collect();
-
-                        for &idx in &selected_indices {
-                            if let Some(atom) = atoms_vec.get(idx) {
-                                ui.label(format!(
-                                    "{} {} {} {} chain {}",
-                                    atom.serial,
-                                    atom.name,
-                                    atom.res_name,
-                                    atom.res_seq,
-                                    atom.chain_id
-                                ));
-                            } else {
-                                ui.label(format!("Index {} out of bounds", idx));
-                            }
-                        }
-                    } else if let Some(gro) = &app.data.gro_file {
-                        let atoms_vec: Vec<_> = gro.atoms().collect();
-
-                        for &idx in &selected_indices {
-                            if let Some(atom) = atoms_vec.get(idx) {
-                                ui.label(format!(
-                                    "{} {} {} {}",
-                                    atom.atom_id,
-                                    atom.atom_name.trimmed(),
-                                    atom.res_name.trimmed(),
-                                    atom.res_num,
-                                ));
-                            } else {
-                                ui.label(format!("Index {} out of bounds", idx));
-                            }
-                        }
-                    } else {
-                        ui.label("No structure loaded to map indices");
-                    }
-                });
-
-            if ui.button("Clear Selection").clicked() {
-                app.selection.selected_atom_indices.clear();
-                app.sync_selection_to_renderer();
-            }
-
-            let can_select_path = selected_indices.len() == 2;
-            if ui
-                .add_enabled(
-                    can_select_path,
-                    egui::Button::new("Select atoms between (2 atoms)"),
-                )
-                .clicked()
-            {
-                app.select_shortest_path(selected_indices[0], selected_indices[1]);
-            }
-
-            if ui
-                .add_enabled(
-                    !selected_indices.is_empty(),
-                    egui::Button::new("Change selected residues' resname..."),
-                )
-                .clicked()
-            {
-                app.ui.show_edit_dialog = true;
-                app.ui.new_res_name = "ALA".to_string();
-            }
-
-            if ui.button("Export (Save)").clicked() {
-                app.export_structure();
-            }
-
-            ui.label(&app.ui.status_msg);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut app.selection.with_hbond_chk, "Select with hbond");
+                ui.separator();
+                ui.label(egui::RichText::new("Hover").strong());
+                ui.monospace(&app.ui.hovered_atom_info);
+                ui.separator();
+                ui.label(egui::RichText::new("Status").strong());
+                ui.label(&app.ui.status_msg);
+            });
         });
 }

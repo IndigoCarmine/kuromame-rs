@@ -2053,13 +2053,14 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kuromame-rs"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "eframe",
  "egui",
  "egui-wgpu",
  "lin_alg",
+ "material-icons",
  "moleucle_3dview_rs",
  "rfd",
 ]
@@ -2167,6 +2168,12 @@ checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "material-icons"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51749189f2b4bf6a522337b504a85a543b5e2af670cb08bcf48297ada61dc2d7"
 
 [[package]]
 name = "matrixmultiply"
