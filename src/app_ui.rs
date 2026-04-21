@@ -224,6 +224,31 @@ pub fn render_top_info_panel(app: &mut KuromameApp, ctx: &egui::Context) {
 
             ui.add_space(4.0);
             ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Selector:");
+                let input = ui.add_sized(
+                    egui::vec2(360.0, 30.0),
+                    egui::TextEdit::singleline(&mut app.ui.selector_input)
+                        .hint_text("select by gromacs-like selector, aC1|aC2"),
+                );
+                let apply_by_enter =
+                    input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let apply_by_button = ui.button("Apply Selector").clicked();
+                let output_by_button = ui.button("Selection -> Text").clicked();
+                if apply_by_enter || apply_by_button {
+                    app.apply_selector_expression();
+                }
+                if output_by_button {
+                    if let Some(selector_text) = app.update_selector_input_from_selection() {
+                        ctx.copy_text(selector_text);
+                        app.ui.status_msg =
+                            "Selection exported to selector text and copied".to_string();
+                    } else {
+                        app.ui.status_msg = "No selected atoms with usable atom names".to_string();
+                    }
+                }
+            });
+
             ui.label(
                 egui::RichText::new(format!(
                     "Selected: {}",

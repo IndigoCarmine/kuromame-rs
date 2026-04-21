@@ -1,11 +1,11 @@
+use crate::parsing::{AtomRecord, GroFile, Mol2File, PdbFile, TopFile};
+use crate::view_rs::To3dViewMolecule;
 use eframe::egui::{self, PointerButton, Sense};
 use lin_alg::f32::{Vec2, Vec3};
 use moleucle_3dview_rs::{
-    camera, Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
-    SelectedAtomRender,
+    Atom, Camera, CameraController, Molecule, MoleculeViewer, OffscreenRenderer,
+    SelectedAtomRender, camera,
 };
-use crate::parsing::{AtomRecord, GroFile, Mol2File, PdbFile, TopFile};
-use crate::view_rs::To3dViewMolecule;
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -39,6 +39,7 @@ struct UiState {
     show_edit_dialog: bool,
     new_res_name: String,
     hovered_atom_info: String,
+    selector_input: String,
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
@@ -91,9 +92,9 @@ fn color_by_res_name(atom: &Atom, is_selected: bool) -> (f32, f32, f32) {
         .unwrap_or(atom.element.as_str());
 
     // Deterministic hash so the same residue name gets the same color each run.
-    let hash = key
-        .bytes()
-        .fold(2166136261u32, |acc, b| (acc ^ (b as u32)).wrapping_mul(16777619));
+    let hash = key.bytes().fold(2166136261u32, |acc, b| {
+        (acc ^ (b as u32)).wrapping_mul(16777619)
+    });
     let hue = (hash % 360) as f32 / 360.0;
     hsl_to_rgb(hue, 0.65, 0.52)
 }
@@ -191,6 +192,7 @@ impl KuromameApp {
                 show_edit_dialog: false,
                 new_res_name: String::new(),
                 hovered_atom_info: "Hover an atom for details".to_string(),
+                selector_input: String::new(),
             },
         }
     }
@@ -236,6 +238,150 @@ impl KuromameApp {
 
     fn toggle_hbond_selection(&mut self) {
         self.selection.with_hbond_chk = !self.selection.with_hbond_chk;
+    }
+
+    fn atom_name_at(&self, atom_index: usize) -> Option<String> {
+        if let Some(gro) = &self.data.gro_file {
+            if let Some(atom) = gro.atoms().nth(atom_index) {
+                let name = atom.atom_name.trimmed();
+                if !name.is_empty() {
+                    return Some(name.to_ascii_uppercase());
+                }
+            }
+        }
+
+        if let Some(pdb) = &self.data.pdb_file {
+            if let Some(atom) = pdb.atoms().nth(atom_index) {
+                let name = atom.name.trim();
+                if !name.is_empty() {
+                    return Some(name.to_ascii_uppercase());
+                }
+            }
+        }
+
+        if let Some(top) = &self.data.top_file {
+            if let Some(atom) = top.atoms().nth(atom_index) {
+                let name = atom.atom.trim();
+                if !name.is_empty() {
+                    return Some(name.to_ascii_uppercase());
+                }
+            }
+        }
+
+        if let Some(mol) = &self.viewer.molecule {
+            if let Some(atom) = mol.atoms.get(atom_index) {
+                if let Some(name) = atom.name.as_ref() {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_ascii_uppercase());
+                    }
+                }
+
+                let element = atom.element.trim();
+                if !element.is_empty() {
+                    return Some(element.to_ascii_uppercase());
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_selector_tokens(selector_expr: &str) -> Vec<String> {
+        selector_expr
+            .split('|')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .filter_map(|token| {
+                let normalized = if token.len() >= 2
+                    && matches!(token.chars().next(), Some('a' | 'A'))
+                    && token[1..]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    token[1..].trim()
+                } else {
+                    token
+                };
+
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized.to_ascii_uppercase())
+                }
+            })
+            .collect()
+    }
+
+    fn apply_selector_expression(&mut self) {
+        let selector_expr = self.ui.selector_input.trim();
+        if selector_expr.is_empty() {
+            self.set_status("Selector is empty (example: aC1|aC2)");
+            return;
+        }
+
+        let Some(mol) = self.viewer.molecule.as_ref() else {
+            self.set_status("No molecule loaded");
+            return;
+        };
+
+        let selector_tokens = Self::parse_selector_tokens(selector_expr);
+        if selector_tokens.is_empty() {
+            self.set_status("Selector format is invalid (example: aC1|aC2)");
+            return;
+        }
+
+        let token_set: std::collections::HashSet<String> = selector_tokens.into_iter().collect();
+        let mut selected_indices = Vec::new();
+
+        for atom_index in 0..mol.atoms.len() {
+            if let Some(atom_name) = self.atom_name_at(atom_index) {
+                if token_set.contains(&atom_name) {
+                    selected_indices.push(atom_index);
+                }
+            }
+        }
+
+        self.selection.selected_atom_indices = selected_indices;
+        self.sync_selection_to_renderer();
+
+        if self.selection.selected_atom_indices.is_empty() {
+            self.set_status("Selector matched 0 atoms");
+        } else {
+            self.set_status(format!(
+                "Selector matched {} atoms",
+                self.selection.selected_atom_indices.len()
+            ));
+        }
+    }
+
+    fn selector_expression_from_selection(&self) -> Option<String> {
+        if self.selection.selected_atom_indices.is_empty() {
+            return None;
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut selector_tokens = Vec::new();
+
+        for &atom_index in &self.selection.selected_atom_indices {
+            if let Some(atom_name) = self.atom_name_at(atom_index) {
+                if seen.insert(atom_name.clone()) {
+                    selector_tokens.push(format!("a{}", atom_name));
+                }
+            }
+        }
+
+        if selector_tokens.is_empty() {
+            None
+        } else {
+            Some(selector_tokens.join("|"))
+        }
+    }
+
+    fn update_selector_input_from_selection(&mut self) -> Option<String> {
+        let text = self.selector_expression_from_selection()?;
+        self.ui.selector_input = text.clone();
+        Some(text)
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
@@ -486,8 +632,16 @@ impl KuromameApp {
     }
 
     fn load_top_and_gro_for_resname_sync(&mut self, top_path: PathBuf, gro_path: PathBuf) {
-        let top_name = top_path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
-        let gro_name = gro_path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        let top_name = top_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let gro_name = gro_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         let top_content = match std::fs::read_to_string(&top_path) {
             Ok(content) => content,
             Err(_) => {
@@ -547,7 +701,11 @@ impl KuromameApp {
     }
 
     fn load_pdb_file(&mut self, path: PathBuf) {
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let pdb = PdbFile::load(&content);
@@ -565,7 +723,11 @@ impl KuromameApp {
     }
 
     fn load_mol2_file(&mut self, path: PathBuf) {
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
                 let mol2 = Mol2File::load(&content);
@@ -584,7 +746,11 @@ impl KuromameApp {
     }
 
     fn load_gro_file(&mut self, path: PathBuf) {
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         const LARGE_GRO_THRESHOLD_BYTES: u64 = 20 * 1024 * 1024;
         let large_gro = std::fs::metadata(&path)
             .map(|m| m.len() >= LARGE_GRO_THRESHOLD_BYTES)
@@ -612,8 +778,15 @@ impl KuromameApp {
     }
 
     fn load_top_file(&mut self, path: PathBuf) {
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown").to_string();
-        match std::fs::read_to_string(&path).ok().map(|content| TopFile::load(&content)) {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        match std::fs::read_to_string(&path)
+            .ok()
+            .map(|content| TopFile::load(&content))
+        {
             Some(top) => {
                 let can_sync_with_loaded_gro = self
                     .data
@@ -651,13 +824,17 @@ impl KuromameApp {
                     }
                     self.sync_viewer_resnames_from_loaded_files();
                     self.set_loaded_summary(format!("TOP+GRO: {}", file_name));
-                    self.set_status("Loaded TOP and synchronized residue names to current GRO/view");
+                    self.set_status(
+                        "Loaded TOP and synchronized residue names to current GRO/view",
+                    );
                 } else if self.data.gro_file.is_some() {
                     self.set_status(
                         "Loaded TOP, but atom order/count does not match loaded GRO (view not updated)",
                     );
                 } else {
-                    self.set_status("Loaded TOP (view unchanged: load GRO to visualize residue changes)");
+                    self.set_status(
+                        "Loaded TOP (view unchanged: load GRO to visualize residue changes)",
+                    );
                 }
             }
             None => self.set_status("Failed to load TOP file"),
@@ -778,12 +955,8 @@ impl KuromameApp {
             std::collections::HashMap::new();
 
         for bond in &mol.bonds {
-            adj.entry(bond.atom_a)
-                .or_default()
-                .insert(bond.atom_b);
-            adj.entry(bond.atom_b)
-                .or_default()
-                .insert(bond.atom_a);
+            adj.entry(bond.atom_a).or_default().insert(bond.atom_b);
+            adj.entry(bond.atom_b).or_default().insert(bond.atom_a);
         }
 
         // 2. DFS to find all simple paths and collect all atoms on any path
@@ -819,7 +992,14 @@ impl KuromameApp {
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
         let mut path = vec![start];
-        dfs(start, end, &adj, &mut visited, &mut path, &mut all_path_atoms);
+        dfs(
+            start,
+            end,
+            &adj,
+            &mut visited,
+            &mut path,
+            &mut all_path_atoms,
+        );
 
         // 3. Return as sorted vector
         let mut result: Vec<usize> = all_path_atoms.into_iter().collect();
@@ -905,7 +1085,10 @@ impl KuromameApp {
     }
 
     fn export_structure(&mut self) {
-        if self.data.top_file.is_none() && self.data.gro_file.is_none() && self.data.pdb_file.is_none() {
+        if self.data.top_file.is_none()
+            && self.data.gro_file.is_none()
+            && self.data.pdb_file.is_none()
+        {
             if let Some(mol) = &self.viewer.molecule {
                 self.data.pdb_file = Some(PdbFile::from_molecule(mol));
             }
@@ -995,7 +1178,10 @@ impl eframe::App for KuromameApp {
                 view_proj,
                 self.viewer.color_fn,
             ) {
-                ui.colored_label(egui::Color32::RED, format!("Offscreen render failed: {err}"));
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Offscreen render failed: {err}"),
+                );
                 return;
             }
 
@@ -1043,7 +1229,9 @@ impl eframe::App for KuromameApp {
                             .pan(Vec2::new(delta.x * 0.01, delta.y * 0.01));
                     } else {
                         // Orbit
-                        self.controller.camera.orbit(delta.x * 0.005, delta.y * 0.005);
+                        self.controller
+                            .camera
+                            .orbit(delta.x * 0.005, delta.y * 0.005);
                     }
                 }
             }
