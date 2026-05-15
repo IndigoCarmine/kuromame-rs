@@ -1,7 +1,8 @@
-use eframe::egui;
-use egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
-use kuromame_rs::app::KuromameApp;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use eframe::egui;
+use egui_wgpu::{WgpuSetup, WgpuSetupCreateNew, wgpu};
+use kuromame_rs::app::KuromameApp;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
